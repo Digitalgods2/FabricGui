@@ -125,6 +125,11 @@ class OutputHistory:
     
     def has_next(self) -> bool:
         return self.current_index < len(self.history) - 1
+    
+    def update_current_output(self, output_text: str) -> None:
+        """Update the output of the current history entry."""
+        if 0 <= self.current_index < len(self.history):
+            self.history[self.current_index]["output"] = output_text
 
 
 class ServerManager:
@@ -392,6 +397,31 @@ class FabricGUI(ctk.CTk):
         # Initialize history
         self.history = OutputHistory()
         
+        # Configure ttk style for Combobox
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure("TCombobox", 
+            fieldbackground="#333333", 
+            background="#333333", 
+            foreground="white", 
+            arrowcolor="white",
+            bordercolor="#333333",
+            darkcolor="#333333",
+            lightcolor="#333333",
+            font=("Roboto", 12)
+        )
+        style.map("TCombobox", 
+            fieldbackground=[("readonly", "#333333")], 
+            selectbackground=[("readonly", "#1f538d")], 
+            selectforeground=[("readonly", "white")],
+            background=[("readonly", "#333333")]
+        )
+        # Configure dropdown listbox style (requires option_add)
+        self.option_add('*TCombobox*Listbox.background', '#333333')
+        self.option_add('*TCombobox*Listbox.foreground', 'white')
+        self.option_add('*TCombobox*Listbox.selectBackground', '#1f538d')
+        self.option_add('*TCombobox*Listbox.selectForeground', 'white')
+        
         # Initialize server manager
         self.server_manager = ServerManager(
             fabric_command=self.app_config["fabric_command"],
@@ -401,6 +431,7 @@ class FabricGUI(ctk.CTk):
         # Request cancellation
         self.cancel_request = False
         self.current_request_thread: Optional[threading.Thread] = None
+        self.current_process = None  # For subprocess execution
         
         # UI Variables
         self.base_url_var = tk.StringVar(value=self.app_config["base_url"])
@@ -489,7 +520,7 @@ class FabricGUI(ctk.CTk):
         frame.pack(fill="x", padx=10, pady=5)
         
         # Title for the frame (simulating LabelFrame)
-        title_label = ctk.CTkLabel(frame, text="Server Configuration", font=("Roboto", 12, "bold"))
+        title_label = ctk.CTkLabel(frame, text="Server Configuration", font=("Roboto", 14, "bold"))
         title_label.grid(row=0, column=0, columnspan=8, sticky="w", padx=10, pady=(5, 0))
         
         # Content container
@@ -564,20 +595,24 @@ class FabricGUI(ctk.CTk):
         frame.pack(fill="x", padx=10, pady=5)
         
         # Title
-        ctk.CTkLabel(frame, text="Pattern Selection", font=("Roboto", 12, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", padx=10, pady=(5, 0))
+        ctk.CTkLabel(frame, text="Pattern Selection", font=("Roboto", 14, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", padx=10, pady=(5, 0))
         
         # Content
         content_frame = ctk.CTkFrame(frame, fg_color="transparent")
         content_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
         
         ctk.CTkLabel(content_frame, text="Pattern:").pack(side="left", padx=5)
-        self.pattern_combo = ctk.CTkComboBox(
+        
+        # Use ttk.Combobox for native scrollbar support
+        self.pattern_combo = ttk.Combobox(
             content_frame, 
-            variable=self.pattern_var, 
-            width=300,
+            textvariable=self.pattern_var, 
+            width=40,
             state="readonly"
         )
         self.pattern_combo.pack(side="left", padx=5, fill="x", expand=True)
+        
+        # Note: ttk.Combobox has native scrolling, no need for custom binding
         
         btn_load = ctk.CTkButton(content_frame, text="Refresh Patterns", command=self.load_patterns)
         btn_load.pack(side="left", padx=5)
@@ -593,11 +628,11 @@ class FabricGUI(ctk.CTk):
         status_frame = ctk.CTkFrame(frame, fg_color="transparent")
         status_frame.pack(side="left", fill="x", expand=True, padx=5, pady=5)
         
-        ctk.CTkLabel(status_frame, text="Status", font=("Roboto", 12, "bold")).pack(anchor="w")
+        ctk.CTkLabel(status_frame, text="Status", font=("Roboto", 14, "bold")).pack(anchor="w")
         self.status_label = ctk.CTkLabel(
             status_frame, 
             textvariable=self.status_var, 
-            font=("Segoe UI", 12, "bold"),
+            font=("Segoe UI", 14, "bold"),
             text_color=("#3B8ED0", "#1F6AA5") # Adaptive blue
         )
         self.status_label.pack(fill="x", pady=2)
@@ -606,12 +641,12 @@ class FabricGUI(ctk.CTk):
         cmd_frame = ctk.CTkFrame(frame, fg_color="transparent")
         cmd_frame.pack(side="left", fill="x", expand=True, padx=5, pady=5)
         
-        ctk.CTkLabel(cmd_frame, text="Command Preview", font=("Roboto", 12, "bold")).pack(anchor="w")
+        ctk.CTkLabel(cmd_frame, text="Command Preview", font=("Roboto", 14, "bold")).pack(anchor="w")
         cmd_entry = ctk.CTkEntry(
             cmd_frame, 
             textvariable=self.command_var, 
             state="readonly",
-            font=("Consolas", 10)
+            font=("Consolas", 12)
         )
         cmd_entry.pack(fill="x", pady=2)
         
@@ -619,7 +654,7 @@ class FabricGUI(ctk.CTk):
         action_frame = ctk.CTkFrame(frame, fg_color="transparent")
         action_frame.pack(side="left", padx=5, pady=5)
         
-        ctk.CTkLabel(action_frame, text="Actions", font=("Roboto", 12, "bold")).pack(anchor="w")
+        ctk.CTkLabel(action_frame, text="Actions", font=("Roboto", 14, "bold")).pack(anchor="w")
         
         button_container = ctk.CTkFrame(action_frame, fg_color="transparent")
         button_container.pack(fill="x", pady=2)
@@ -684,7 +719,7 @@ class FabricGUI(ctk.CTk):
             
             label = tk.Label(self.tooltip, text=text, justify='left',
                            background="#ffffff", relief='solid', borderwidth=1,
-                           font=("tahoma", "8", "normal"))
+                           font=("tahoma", "10", "normal"))
             label.pack(ipadx=1)
             
         def leave(event):
@@ -704,7 +739,7 @@ class FabricGUI(ctk.CTk):
         input_frame = ctk.CTkFrame(frame, fg_color="transparent")
         input_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
         
-        ctk.CTkLabel(input_frame, text="Input", font=("Roboto", 12, "bold")).pack(anchor="w")
+        ctk.CTkLabel(input_frame, text="Input", font=("Roboto", 14, "bold")).pack(anchor="w")
         
         # Input Toolbar
         input_toolbar = ctk.CTkFrame(input_frame, fg_color="transparent")
@@ -716,7 +751,7 @@ class FabricGUI(ctk.CTk):
         self.input_text = ctk.CTkTextbox(
             input_frame, 
             wrap="word", 
-            font=("Consolas", 12)
+            font=("Consolas", 14)
         )
         self.input_text.pack(fill="both", expand=True, padx=2, pady=2)
         # Bind context menu to internal text widget for correct event handling
@@ -726,7 +761,7 @@ class FabricGUI(ctk.CTk):
         output_frame = ctk.CTkFrame(frame, fg_color="transparent")
         output_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
         
-        ctk.CTkLabel(output_frame, text="Output", font=("Roboto", 12, "bold")).pack(anchor="w")
+        ctk.CTkLabel(output_frame, text="Output", font=("Roboto", 14, "bold")).pack(anchor="w")
         
         # Output toolbar
         output_toolbar = ctk.CTkFrame(output_frame, fg_color="transparent")
@@ -759,7 +794,7 @@ class FabricGUI(ctk.CTk):
             output_frame, 
             wrap="word", 
             state="disabled",
-            font=("Consolas", 12)
+            font=("Consolas", 14)
         )
         self.output_text.pack(fill="both", expand=True, padx=2, pady=2)
         # Bind context menu to internal text widget
@@ -774,6 +809,29 @@ class FabricGUI(ctk.CTk):
         self.bind("<Alt-Left>", lambda e: self.history_previous())
         self.bind("<Alt-Right>", lambda e: self.history_next())
         self.bind("<Control-Return>", lambda e: self.on_send())
+    
+    def _bind_mousewheel_to_combobox(self, combobox):
+        """Enable mouse wheel scrolling for combobox."""
+        def on_mousewheel(event):
+            values = combobox.cget("values")
+            if not values:
+                return
+            
+            current = combobox.get()
+            try:
+                index = list(values).index(current)
+            except ValueError:
+                index = 0
+            
+            # Scroll up or down
+            if event.delta > 0:  # Scroll up
+                index = max(0, index - 1)
+            else:  # Scroll down
+                index = min(len(values) - 1, index + 1)
+            
+            combobox.set(values[index])
+        
+        combobox.bind("<MouseWheel>", on_mousewheel)
     
     # -----------------------------
     # Helper Methods
@@ -1117,44 +1175,67 @@ class FabricGUI(ctk.CTk):
             self.app_config["last_pattern"] = pattern
             self.save_config()
             
-            # Prepare request
-            url = f"{self.server_manager.base_url}/ai/text"
-            headers = self.get_headers()
-            data = {
-                "text": input_text,
-                "pattern": pattern
-            }
+            # Use subprocess to call fabric CLI directly
+            fabric_cmd = self.app_config.get("fabric_command", "fabric")
+            cmd = [fabric_cmd, "-p", pattern]
             
-            # Streaming request
-            response = requests.post(url, json=data, headers=headers, stream=True, timeout=300)
-            response.raise_for_status()
+            # Start process
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8',
+                bufsize=1
+            )
+            
+            self.current_process = process
+            
+            # Send input
+            process.stdin.write(input_text)
+            process.stdin.close()
             
             full_output = ""
-            for line in response.iter_lines():
+            
+            # Read stdout line by line
+            while True:
                 if self.cancel_request:
+                    process.terminate()
                     break
+                
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                
                 if line:
-                    decoded_line = line.decode('utf-8')
-                    full_output += decoded_line + "\n"
-                    self.after(0, self._append_output_line, decoded_line + "\n")
+                    full_output += line
+                    self.after(0, self._append_output_line, line)
             
             if self.cancel_request:
                 self.after(0, lambda: self.status_var.set("Cancelled"))
+            elif process.returncode != 0:
+                stderr_output = process.stderr.read()
+                if stderr_output:
+                    logger.error(f"Fabric CLI error: {stderr_output}")
+                    self.after(0, lambda: messagebox.showerror("Error", f"Fabric Error: {stderr_output}"))
+                    self.after(0, lambda: self.status_var.set("Error"))
+                else:
+                    self.after(0, lambda: self.status_var.set("Completed (with warning)"))
+                    self.history.update_current_output(full_output)
             else:
                 self.after(0, lambda: self.status_var.set("Completed"))
-                # Update history with output
                 self.history.update_current_output(full_output)
                 
-        except requests.exceptions.ConnectionError:
-            self.after(0, lambda: messagebox.showerror("Error", "Could not connect to Fabric server."))
-            self.after(0, lambda: self.status_var.set("Connection Error"))
         except Exception as e:
             logger.error(f"Processing error: {e}")
-            self.after(0, lambda: messagebox.showerror("Error", f"An error occurred: {str(e)}"))
+            error_msg = str(e)
+            self.after(0, lambda: messagebox.showerror("Error", f"An error occurred: {error_msg}"))
             self.after(0, lambda: self.status_var.set("Error"))
         finally:
             self.after(0, lambda: self.set_ui_state(processing=False))
             self.current_request_thread = None
+            self.current_process = None
             
     def _append_output_line(self, text):
         """Append a line to the output text widget."""
@@ -1276,7 +1357,8 @@ class FabricGUI(ctk.CTk):
         
     def on_closing(self):
         """Handle application closing."""
-        if self.server_manager.is_running():
+        # Only prompt if the GUI started the server (not an external one)
+        if self.server_manager.process is not None and self.server_manager.is_running():
             if messagebox.askyesno("Stop Server", "Stop Fabric server before exiting?"):
                 self.server_manager.stop_server()
         

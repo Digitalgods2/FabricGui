@@ -219,7 +219,17 @@ fabricgui.py          # Main application
 
 ## Version History
 
-### Version 3.0 (Current) ⭐ MAJOR UPDATE
+### Version 3.1 (Latest) 🚀
+- ✅ **Reliable AI Processing**: Switched to direct `subprocess` execution for guaranteed correct output
+- ✅ **Enhanced UI**: 
+    - Added vertical scrollbar to pattern dropdown (ttk.Combobox)
+    - Increased font sizes for better legibility
+    - Added mouse wheel support
+- ✅ **Smarter Server Management**: 
+    - Improved stop logic (won't kill externally started servers)
+    - Better error handling and status reporting
+
+### Version 3.0 ⭐ MAJOR UPDATE
 - ✅ **CustomTkinter Migration**: Complete UI overhaul with modern look and dark mode
 - ✅ **Context Menus**: Added right-click support for text widgets
 - ✅ **Bug Fixes**:
