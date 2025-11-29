@@ -200,6 +200,12 @@ View logs via: **Help → View Logs**
 - Check network connection
 - Verify server is responding
 
+### "Ollama Get ... connection refused"
+- **This is normal** if you are not running a local Ollama instance.
+- The Fabric CLI automatically checks for local models on startup.
+- The GUI filters this message to keep the output clean, but you might see it briefly or in logs.
+- It does not affect cloud models (Claude, GPT-4, etc.).
+
 ## Development
 
 ### Project Structure
@@ -223,11 +229,16 @@ fabricgui.py          # Main application
 - ✅ **Reliable AI Processing**: Switched to direct `subprocess` execution for guaranteed correct output
 - ✅ **Enhanced UI**: 
     - Added vertical scrollbar to pattern dropdown (ttk.Combobox)
+    - **Expanded Dropdowns**: Increased list size to 40 items for easier browsing
     - Increased font sizes for better legibility
     - Added mouse wheel support
 - ✅ **Smarter Server Management**: 
     - Improved stop logic (won't kill externally started servers)
     - Better error handling and status reporting
+- ✅ **Bug Fixes**:
+    - Fixed output buffering/hanging issues
+    - Fixed encoding issues with emojis/symbols
+    - Filtered startup connection errors
 
 ### Version 3.0 ⭐ MAJOR UPDATE
 - ✅ **CustomTkinter Migration**: Complete UI overhaul with modern look and dark mode

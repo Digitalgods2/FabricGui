@@ -261,7 +261,7 @@ class ServerManager:
         self._health_check_thread.start()
         logger.info(f"Health monitoring started (interval: {interval}s)")
 
-    def get_patterns(self) -> List[str]:
+    def get_patterns(self) -> Optional[List[str]]:
         """Get list of available patterns from server."""
         try:
             # Try to fetch patterns from the server
@@ -275,7 +275,88 @@ class ServerManager:
             return []
         except Exception as e:
             logger.error(f"Failed to get patterns: {e}")
-            return []
+            return None
+
+    def get_models(self) -> Dict[str, List[str]]:
+        """Get list of available models from fabric CLI."""
+        try:
+            # Run fabric --listmodels
+            import shutil
+            fabric_path = shutil.which(self.fabric_command)
+            if not fabric_path:
+                return {}
+
+            # Run command
+            result = subprocess.run(
+                [fabric_path, "--listmodels"],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"Failed to list models: {result.stderr}")
+                return {}
+
+            models_by_provider = {}
+            
+            # Parse output
+            # Format: [index] Provider|Model or just Model
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Strip index like [123]
+                import re
+                # Match [123] at start, allowing for whitespace
+                match = re.match(r'^\[\d+\]\s*(.*)$', line)
+                if match:
+                    content = match.group(1).strip()
+                    
+                    if '|' in content:
+                        provider, model = content.split('|', 1)
+                        provider = provider.strip()
+                        model = model.strip()
+                    else:
+                        provider = "Other"
+                        model = content.strip()
+                        
+                    if provider not in models_by_provider:
+                        models_by_provider[provider] = []
+                    models_by_provider[provider].append(model)
+            
+            return models_by_provider
+            
+        except Exception as e:
+            logger.error(f"Error getting models: {e}")
+            return {}
+
+    def get_default_model(self) -> Optional[str]:
+        """Get default model from Fabric config."""
+        try:
+            # Config is usually at ~/.config/fabric/.env
+            config_path = Path.home() / ".config" / "fabric" / ".env"
+            
+            if not config_path.exists():
+                return None
+                
+            # Read file
+            with open(config_path, "r", encoding="utf-8") as f:
+                content = f.read()
+                
+            # Parse DEFAULT_MODEL=...
+            import re
+            match = re.search(r'^DEFAULT_MODEL=(.+)$', content, re.MULTILINE)
+            if match:
+                return match.group(1).strip()
+                
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting default model: {e}")
+            return None
 
     def normalize_base_url(self, url: str) -> str:
         """Normalize and validate base URL."""
@@ -608,7 +689,8 @@ class FabricGUI(ctk.CTk):
             content_frame, 
             textvariable=self.pattern_var, 
             width=40,
-            state="readonly"
+            state="readonly",
+            height=40
         )
         self.pattern_combo.pack(side="left", padx=5, fill="x", expand=True)
         
@@ -617,7 +699,51 @@ class FabricGUI(ctk.CTk):
         btn_load = ctk.CTkButton(content_frame, text="Refresh Patterns", command=self.load_patterns)
         btn_load.pack(side="left", padx=5)
         
+        # Model Selection
+        model_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        model_frame.grid(row=2, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        
+        ctk.CTkLabel(model_frame, text="Model:").pack(side="left", padx=5)
+        
+        self.model_var = tk.StringVar()
+        self.model_combo = ttk.Combobox(
+            model_frame,
+            textvariable=self.model_var,
+            width=40,
+            state="readonly",
+            height=40
+        )
+        self.model_combo.pack(side="left", padx=5, fill="x", expand=True)
+        self.model_combo.bind("<<ComboboxSelected>>", self._on_model_selected)
+        
+        # Default Model Label
+        self.default_model_label = ctk.CTkLabel(
+            model_frame, 
+            text="Default: (loading...)", 
+            text_color="gray",
+            cursor="hand2"
+        )
+        self.default_model_label.pack(side="left", padx=5)
+        
+        # Bind click and hover events
+        self.default_model_label.bind("<Button-1>", lambda e: self.reset_model_selection())
+        self.default_model_label.bind("<Enter>", lambda e: self.default_model_label.configure(text_color="#3B8ED0")) # Blue on hover
+        self.default_model_label.bind("<Leave>", lambda e: self.default_model_label.configure(text_color="gray"))
+        
         frame.columnconfigure(0, weight=1)
+        
+        # Load models
+        self.after(1000, self.load_models)
+
+    def reset_model_selection(self):
+        """Reset model selection to default."""
+        self.model_var.set("")
+        self._update_command_preview()
+        self.status_var.set("Model reset to default")
+        # Flash the label to indicate action
+        original_color = self.default_model_label.cget("text_color")
+        self.default_model_label.configure(text_color="green")
+        self.after(300, lambda: self.default_model_label.configure(text_color="gray"))
     
     def _build_info_frame(self):
         """Build info frame with status and command preview."""
@@ -672,17 +798,33 @@ class FabricGUI(ctk.CTk):
             button_container, 
             text="Send", 
             command=self.on_send,
-            width=100
+            width=100,
+            fg_color="green",
+            hover_color="darkgreen"
         )
         self.btn_send.pack(side="left", padx=2)
     
     def _update_command_preview(self, *args):
         """Update the command preview based on current pattern."""
         pattern = self.pattern_var.get()
+        cmd = self.app_config['fabric_command']
+        
         if pattern:
-            cmd = f"{self.app_config['fabric_command']} -p {pattern}"
-        else:
-            cmd = self.app_config['fabric_command']
+            cmd += f" -p {pattern}"
+            
+        # Add model if selected
+        if hasattr(self, 'model_var'):
+            model_selection = self.model_var.get()
+            if model_selection and not model_selection.endswith("(Default)"):
+                # Extract model name from selection (strip indentation)
+                model_name = model_selection.strip()
+                # If it's a provider header (no indentation), ignore it in preview?
+                # But our selection logic should prevent selecting headers.
+                if model_name and not model_selection.startswith(" "): # It's a header
+                     pass 
+                elif model_name:
+                    cmd += f" -m {model_name}"
+                    
         self.command_var.set(cmd)
     
     def _add_context_menu(self, widget):
@@ -1111,15 +1253,19 @@ class FabricGUI(ctk.CTk):
         """Load available patterns from Fabric."""
         try:
             patterns = self.server_manager.get_patterns()
-            if patterns:
-                logger.info(f"Loaded {len(patterns)} patterns")
-                self.pattern_combo.configure(values=patterns)
-                if self.app_config["last_pattern"] in patterns:
-                    self.pattern_var.set(self.app_config["last_pattern"])
-                elif patterns:
-                    self.pattern_var.set(patterns[0])
+            if patterns is not None:
+                if patterns:
+                    logger.info(f"Loaded {len(patterns)} patterns")
+                    self.pattern_combo.configure(values=patterns)
+                    if self.app_config["last_pattern"] in patterns:
+                        self.pattern_var.set(self.app_config["last_pattern"])
+                    elif patterns:
+                        self.pattern_var.set(patterns[0])
+                else:
+                    self.pattern_combo.configure(values=["No patterns found"])
+                    self.pattern_var.set("")
             else:
-                self.pattern_combo.configure(values=["No patterns found"])
+                self.pattern_combo.configure(values=["Server Offline / Error"])
                 self.pattern_var.set("")
         except Exception as e:
             logger.error(f"Error loading patterns: {e}")
@@ -1162,6 +1308,62 @@ class FabricGUI(ctk.CTk):
             self.status_var.set("Cancelling...")
             self.btn_cancel.configure(state="disabled")
             
+    def load_models(self):
+        """Load available models and populate dropdown."""
+        try:
+            models_by_provider = self.server_manager.get_models()
+            if not models_by_provider:
+                self.model_combo.configure(values=["Error loading models"])
+                return
+
+            display_values = []
+            
+            # Sort providers
+            sorted_providers = sorted(models_by_provider.keys())
+            
+            for provider in sorted_providers:
+                # Add Provider as a header (no indentation)
+                display_values.append(provider)
+                
+                # Add models indented
+                for model in sorted(models_by_provider[provider]):
+                    display_values.append(f"  {model}")
+            
+            self.model_combo.configure(values=display_values)
+            
+            # Get default model
+            default_model = self.server_manager.get_default_model()
+            if default_model:
+                self.default_model_label.configure(text=f"Default: {default_model}")
+            else:
+                self.default_model_label.configure(text="Default: (System Default)")
+            
+            # Restore last selected model if valid
+            last_model = self.app_config.get("last_model", "")
+            if last_model:
+                # Try to find it in the list (it might be indented)
+                if f"  {last_model}" in display_values:
+                    self.model_var.set(f"  {last_model}")
+                elif last_model in display_values: # Should not happen for models
+                    self.model_var.set(last_model)
+            
+        except Exception as e:
+            logger.error(f"Error loading models: {e}")
+            self.model_combo.configure(values=["Error loading models"])
+
+    def _on_model_selected(self, event):
+        """Handle model selection."""
+        selection = self.model_var.get()
+        if not selection.startswith("  "):
+            # User selected a provider header, reset selection or ignore
+            # Ideally we would disable selection of headers, but Combobox doesn't support that easily.
+            # We'll just clear it or select the first child?
+            # Let's just clear it for now to indicate invalid selection
+            self.model_var.set("")
+            return
+            
+        self._update_command_preview()
+
     def _process_request(self, input_text):
         """Process the request in a background thread."""
         try:
@@ -1173,56 +1375,147 @@ class FabricGUI(ctk.CTk):
 
             # Save last used pattern
             self.app_config["last_pattern"] = pattern
+            
+            # Save last used model
+            model_selection = self.model_var.get()
+            if model_selection and model_selection.startswith("  "):
+                self.app_config["last_model"] = model_selection.strip()
+            
             self.save_config()
             
             # Use subprocess to call fabric CLI directly
             fabric_cmd = self.app_config.get("fabric_command", "fabric")
             cmd = [fabric_cmd, "-p", pattern]
             
-            # Start process
+            # Add model flag if selected
+            if model_selection and model_selection.startswith("  "):
+                model_name = model_selection.strip()
+                cmd.extend(["-m", model_name])
+            
+            # Prepare environment with unbuffered output
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            
+            # Start process with unbuffered binary I/O
             process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding='utf-8',
-                bufsize=1
+                stderr=subprocess.STDOUT, # Redirect stderr to stdout to prevent deadlock
+                text=False, # Binary mode for unbuffered I/O
+                bufsize=0,  # Unbuffered
+                env=env
             )
             
             self.current_process = process
             
-            # Send input
-            process.stdin.write(input_text)
-            process.stdin.close()
+            # Helper function to write input in a separate thread
+            def _write_input(proc, text):
+                try:
+                    if text:
+                        # Encode to UTF-8
+                        proc.stdin.write(text.encode('utf-8'))
+                        proc.stdin.flush()
+                    proc.stdin.close()
+                except Exception as e:
+                    logger.error(f"Error writing to stdin: {e}")
+
+            # Start writer thread
+            self.after(0, lambda: self.status_var.set("Sending input..."))
+            writer_thread = threading.Thread(target=_write_input, args=(process, input_text))
+            writer_thread.daemon = True
+            writer_thread.start()
             
             full_output = ""
             
-            # Read stdout line by line
+            # Use incremental decoder for correct UTF-8 handling across chunks
+            import codecs
+            decoder = codecs.getincrementaldecoder("utf-8")(errors='replace')
+            
+            # Buffer for filtering startup errors (like Ollama connection issues)
+            startup_buffer = ""
+            filtering_phase = True
+            
+            # Read stdout in chunks to ensure real-time updates without freezing UI
             while True:
                 if self.cancel_request:
                     process.terminate()
                     break
                 
-                line = process.stdout.readline()
-                if not line and process.poll() is not None:
+                # Read a chunk of bytes (unbuffered)
+                chunk = process.stdout.read(4096)
+                
+                if not chunk and process.poll() is not None:
                     break
                 
-                if line:
-                    full_output += line
-                    self.after(0, self._append_output_line, line)
+                if chunk:
+                    text = decoder.decode(chunk, final=False)
+                    if not text:
+                        continue
+                        
+                    if filtering_phase:
+                        startup_buffer += text
+                        
+                        # If we have a newline or buffer is getting large, process it
+                        if "\n" in startup_buffer or len(startup_buffer) > 1000:
+                            # Split into lines to filter
+                            lines = startup_buffer.splitlines(keepends=True)
+                            
+                            # If the last line is incomplete and buffer isn't too huge, keep it
+                            pending = ""
+                            if not startup_buffer.endswith("\n") and len(startup_buffer) <= 1000:
+                                pending = lines.pop()
+                            
+                            filtered_text = ""
+                            for line in lines:
+                                # Filter out Ollama connection errors
+                                if "Ollama Get" in line and "connectex" in line:
+                                    continue
+                                filtered_text += line
+                            
+                            if filtered_text:
+                                self.after(0, self._append_output_text, filtered_text)
+                            
+                            # If we processed lines, we can probably stop filtering, 
+                            # unless the error spans multiple lines (unlikely for this specific error)
+                            # But to be safe, we'll stop filtering after the first batch of lines
+                            # or if we have printed something real.
+                            if filtered_text.strip():
+                                filtering_phase = False
+                                # Output pending immediately if we stop filtering
+                                if pending:
+                                    self.after(0, self._append_output_text, pending)
+                                    pending = ""
+                            
+                            startup_buffer = pending
+                            
+                            # If buffer is still growing (no newlines found yet but > 1000 chars),
+                            # just dump it to avoid holding back content
+                            if len(startup_buffer) > 1000:
+                                self.after(0, self._append_output_text, startup_buffer)
+                                startup_buffer = ""
+                                filtering_phase = False
+                    else:
+                        # Passthrough mode
+                        self.after(0, self._append_output_text, text)
+            
+            # Flush any remaining bytes
+            remaining = decoder.decode(b"", final=True)
+            if remaining:
+                if filtering_phase and startup_buffer:
+                     # Process remaining buffer
+                     remaining = startup_buffer + remaining
+                self.after(0, self._append_output_text, remaining)
+            
+            # Wait for writer thread to finish
+            writer_thread.join(timeout=1)
             
             if self.cancel_request:
                 self.after(0, lambda: self.status_var.set("Cancelled"))
             elif process.returncode != 0:
-                stderr_output = process.stderr.read()
-                if stderr_output:
-                    logger.error(f"Fabric CLI error: {stderr_output}")
-                    self.after(0, lambda: messagebox.showerror("Error", f"Fabric Error: {stderr_output}"))
-                    self.after(0, lambda: self.status_var.set("Error"))
-                else:
-                    self.after(0, lambda: self.status_var.set("Completed (with warning)"))
-                    self.history.update_current_output(full_output)
+                # Stderr is already in stdout, so we just check return code
+                self.after(0, lambda: self.status_var.set("Completed (with error code)"))
+                self.history.update_current_output(full_output)
             else:
                 self.after(0, lambda: self.status_var.set("Completed"))
                 self.history.update_current_output(full_output)
@@ -1237,8 +1530,8 @@ class FabricGUI(ctk.CTk):
             self.current_request_thread = None
             self.current_process = None
             
-    def _append_output_line(self, text):
-        """Append a line to the output text widget."""
+    def _append_output_text(self, text):
+        """Append text to the output text widget."""
         self.output_text.configure(state="normal")
         self.output_text.insert("end", text)
         self.output_text.see("end")
@@ -1294,20 +1587,26 @@ class FabricGUI(ctk.CTk):
         
     def history_previous(self):
         """Navigate to previous history item."""
-        input_text, output_text = self.history.previous()
-        if input_text is not None:
+        entry = self.history.previous()
+        if entry:
             self.input_text.delete("1.0", "end")
-            self.input_text.insert("1.0", input_text)
-            self.set_output_text(output_text)
+            self.input_text.insert("1.0", entry["input"])
+            self.set_output_text(entry["output"])
+            # Also restore the pattern used
+            if entry["pattern"] and entry["pattern"] in self.pattern_combo.cget("values"):
+                self.pattern_var.set(entry["pattern"])
             self._update_history_buttons()
             
     def history_next(self):
         """Navigate to next history item."""
-        input_text, output_text = self.history.next()
-        if input_text is not None:
+        entry = self.history.next()
+        if entry:
             self.input_text.delete("1.0", "end")
-            self.input_text.insert("1.0", input_text)
-            self.set_output_text(output_text)
+            self.input_text.insert("1.0", entry["input"])
+            self.set_output_text(entry["output"])
+            # Also restore the pattern used
+            if entry["pattern"] and entry["pattern"] in self.pattern_combo.cget("values"):
+                self.pattern_var.set(entry["pattern"])
             self._update_history_buttons()
             
     def _update_history_buttons(self):
