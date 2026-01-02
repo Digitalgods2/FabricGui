@@ -1,579 +1,830 @@
 """
-Fabric Mini GUI - A desktop client for interacting with Fabric AI patterns.
+Fabric GUI - A desktop client for interacting with Fabric AI patterns.
 
-This application provides a graphical interface for sending text to Fabric patterns
-and receiving AI-processed responses.
+Windows fixes:
+- Fabric server flag is --address (NOT --port). Help shows: --address= (default :8080).
+- When starting server, pass address as ':PORT' (e.g. ':8083').
+- Auto-migrate older config that still has port_flag='--port' to '--address'.
+- Keep base_url and server bind port in sync.
+- Capture server stdout so failures show the real reason in logs/UI.
 """
 
+import codecs
 import json
 import logging
+import logging.handlers
 import os
+import re
+import shutil
 import subprocess
-import signal
 import threading
 import time
 import tkinter as tk
-import customtkinter as ctk
 from datetime import datetime
 from pathlib import Path
-from tkinter import ttk, messagebox, scrolledtext, filedialog
+from tkinter import ttk, messagebox, filedialog
 from typing import Dict, List, Optional, Any
+from urllib.parse import urlparse
 
+import customtkinter as ctk
 import requests
 
+# -----------------------------
+# Constants
+# -----------------------------
 
-# Configure logging
+MAX_HISTORY_SIZE = 50
+CHUNK_SIZE = 4096
+SERVER_HEALTH_CHECK_INTERVAL = 5  # seconds
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
+
+FONT_HEADING = ("Roboto", 14, "bold")
+FONT_CODE = ("Consolas", 12)
+DEFAULT_WINDOW_SIZE = "900x600"
+
+# -----------------------------
+# Help Documentation
+# -----------------------------
+
+HELP_TEXT = """
+╔══════════════════════════════════════════════════════════════════╗
+║                     FABRIC GUI - USER GUIDE                      ║
+╚══════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  WHAT IS FABRIC GUI?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Fabric GUI is a desktop client for the Fabric AI framework. It provides
+a graphical interface to run AI "patterns" - pre-built prompts that
+transform your input text using AI models like GPT-4, Claude, etc.
+
+Common use cases:
+  • Summarizing articles, transcripts, or documents
+  • Extracting key insights from meetings
+  • Analyzing and improving writing
+  • Generating code explanations
+  • And many more patterns...
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  GETTING STARTED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. START THE SERVER
+   Click the "Start" button to launch the Fabric server.
+   The LED indicator will turn green when ready.
+
+2. SELECT A PATTERN
+   Use the Pattern dropdown to choose what you want to do.
+   Use the search box to filter patterns by name.
+
+3. ENTER YOUR INPUT
+   Paste or type text into the Input panel.
+   Use "Import" to load text from a .txt or .md file.
+
+4. CLICK SEND
+   The output will appear in the Output panel.
+   A pulsing animation shows processing is active.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SERVER MANAGEMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STATUS LED:
+  🔴 Red   = Server offline
+  🟢 Green = Server online and ready
+
+BUTTONS:
+  [Start] - Launch the Fabric server
+  [Stop]  - Shut down the server
+  [Test]  - Check server connectivity
+
+BASE URL:
+  Default: http://localhost:8083
+  The server runs on port 8083 to avoid common conflicts.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  INPUT/OUTPUT PANELS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+INPUT TOOLBAR:
+  [Import] - Load text from a file (.txt, .md)
+  [Paste]  - Paste from clipboard
+  [Clear]  - Clear the input box
+
+OUTPUT TOOLBAR:
+  [Copy]   - Copy output to clipboard
+  [Save]   - Save output to a file
+  [Clear]  - Clear the output box
+  [<] [>]  - Navigate through history
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  KEYBOARD SHORTCUTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Ctrl+Enter    Send request
+  Ctrl+S        Save output to file
+  Ctrl+C        Copy output to clipboard
+  Alt+Left      Previous history entry
+  Alt+Right     Next history entry
+
+  Right-click any text box for Cut/Copy/Paste/Select All
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  HISTORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Fabric GUI saves your last 50 requests automatically.
+
+Use the [<] and [>] buttons or Alt+Arrow keys to navigate.
+History includes the pattern used, input text, and output.
+History persists between sessions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  MODEL SELECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The Model dropdown shows all available AI models grouped by provider.
+Click "Default: ..." to reset to your configured default model.
+
+Models are loaded from Fabric's configuration.
+You can set your default model using: fabric --setup
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CONFIGURATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Settings are saved automatically to:
+  ~/.fabric_gui/config.json
+
+You can manually edit this file to change:
+  • auto_start_server: true/false
+  • stop_server_on_exit: true/false
+  • server_health_check_interval: seconds
+  • fabric_command: path to Fabric executable
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  LOGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Logs are saved to: ~/.fabric_gui/fabric_gui.log
+
+Log files rotate automatically:
+  • Max size: 5 MB per file
+  • Keeps 3 backup files
+  • Total max: ~20 MB
+
+View logs: Help → View Logs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TROUBLESHOOTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+"Server won't start"
+  → Make sure Fabric is installed (fabric --version)
+  → Check if port 8083 is available
+  → View logs for detailed error messages
+
+"No patterns showing"
+  → Start the server first
+  → Click "Refresh Patterns"
+  → Check server connectivity with "Test"
+
+"Processing seems stuck"
+  → Click "Cancel" to abort
+  → Some AI models take longer than others
+  → Check your internet connection
+
+"Ollama connection errors"
+  → This is normal if you don't have Ollama installed
+  → These messages are filtered from output
+  → Does not affect cloud models (GPT, Claude, etc.)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ABOUT FABRIC
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Fabric is an open-source AI framework by Daniel Miessler.
+Learn more: https://github.com/danielmiessler/fabric
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CREDITS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Fabric GUI designed and developed by DigitalGods.ai
+https://digitalgods.ai
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+
+# -----------------------------
+# Logging
+# -----------------------------
+
 LOG_DIR = Path.home() / ".fabric_gui"
 LOG_DIR.mkdir(exist_ok=True)
 LOG_FILE = LOG_DIR / "fabric_gui.log"
 
+rotating_handler = logging.handlers.RotatingFileHandler(
+    LOG_FILE,
+    maxBytes=LOG_MAX_BYTES,
+    backupCount=LOG_BACKUP_COUNT,
+    encoding="utf-8",
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
+    handlers=[rotating_handler, logging.StreamHandler()],
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("fabric_gui")
 
+
+# -----------------------------
+# Config
+# -----------------------------
 
 class ConfigManager:
-    """Manages application configuration persistence."""
-    
     CONFIG_FILE = LOG_DIR / "config.json"
-    
+
     DEFAULT_CONFIG = {
-        "base_url": "http://localhost:8080",
-        "api_key": "",
-        "request_timeout": 300,  # 5 minutes
+        "base_url": "http://localhost:8083",
         "last_pattern": "",
-        "window_geometry": "900x600",
+        "last_model": "",
+        "window_geometry": DEFAULT_WINDOW_SIZE,
         "auto_start_server": False,
         "stop_server_on_exit": True,
-        "server_health_check_interval": 5,
-        "fabric_command": "fabric"
+        "server_health_check_interval": SERVER_HEALTH_CHECK_INTERVAL,
+        "fabric_command": "fabric",
+        # Fabric uses --address= for server bind, not --port
+        "port_flag": "--address",
     }
-    
+
     @classmethod
     def load(cls) -> Dict[str, Any]:
-        """Load configuration from file."""
+        cfg = cls.DEFAULT_CONFIG.copy()
+        changed = False
+
         try:
             if cls.CONFIG_FILE.exists():
-                with open(cls.CONFIG_FILE, 'r') as f:
-                    config = json.load(f)
-                    # Merge with defaults to handle new config keys
-                    return {**cls.DEFAULT_CONFIG, **config}
+                with open(cls.CONFIG_FILE, "r", encoding="utf-8") as f:
+                    disk = json.load(f)
+                cfg.update(disk)
         except Exception as e:
             logger.error(f"Failed to load config: {e}")
-        return cls.DEFAULT_CONFIG.copy()
-    
+
+        # Normalize base_url (avoid trailing slash)
+        try:
+            base_url = str(cfg.get("base_url", "")).strip()
+            if base_url.endswith("/"):
+                base_url = base_url[:-1]
+                cfg["base_url"] = base_url
+                changed = True
+        except Exception:
+            pass
+
+        # Migration: if config still uses old/invalid flag --port, switch to --address
+        if str(cfg.get("port_flag", "")).strip() == "--port":
+            cfg["port_flag"] = "--address"
+            changed = True
+
+        # Migration: if base_url is localhost:8080, bump to 8083 to avoid conflicts
+        try:
+            parsed = urlparse(str(cfg.get("base_url", "")))
+            if parsed.hostname in ("localhost", "127.0.0.1") and (parsed.port is None or parsed.port == 8080):
+                cfg["base_url"] = "http://localhost:8083"
+                changed = True
+        except Exception:
+            cfg["base_url"] = "http://localhost:8083"
+            changed = True
+
+        if changed:
+            cls.save(cfg)
+
+        return cfg
+
     @classmethod
     def save(cls, config: Dict[str, Any]) -> None:
-        """Save configuration to file."""
         try:
-            with open(cls.CONFIG_FILE, 'w') as f:
-                json.dump(config, f, indent=2)
+            with open(cls.CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
             logger.info("Configuration saved")
         except Exception as e:
             logger.error(f"Failed to save config: {e}")
 
 
+# -----------------------------
+# History
+# -----------------------------
+
 class OutputHistory:
-    """Manages output history with navigation."""
-    
-    def __init__(self, max_size: int = 50):
+    HISTORY_FILE = LOG_DIR / "history.json"
+
+    def __init__(self, max_size: int = MAX_HISTORY_SIZE):
         self.history: List[Dict[str, str]] = []
         self.max_size = max_size
         self.current_index = -1
-    
+        self.load()
+
     def add(self, pattern: str, input_text: str, output_text: str) -> None:
-        """Add an entry to history."""
         entry = {
             "timestamp": datetime.now().isoformat(),
             "pattern": pattern,
             "input": input_text,
-            "output": output_text
+            "output": output_text,
         }
         self.history.append(entry)
         if len(self.history) > self.max_size:
             self.history.pop(0)
         self.current_index = len(self.history) - 1
-    
-    def get_current(self) -> Optional[Dict[str, str]]:
-        """Get current history entry."""
+        self.save()
+
+    def update_current_output(self, output_text: str) -> None:
         if 0 <= self.current_index < len(self.history):
-            return self.history[self.current_index]
-        return None
-    
+            self.history[self.current_index]["output"] = output_text
+            self.save()
+
     def previous(self) -> Optional[Dict[str, str]]:
-        """Move to previous entry."""
         if self.current_index > 0:
             self.current_index -= 1
             return self.history[self.current_index]
         return None
-    
+
     def next(self) -> Optional[Dict[str, str]]:
-        """Move to next entry."""
         if self.current_index < len(self.history) - 1:
             self.current_index += 1
             return self.history[self.current_index]
         return None
-    
+
     def has_previous(self) -> bool:
         return self.current_index > 0
-    
+
     def has_next(self) -> bool:
         return self.current_index < len(self.history) - 1
-    
-    def update_current_output(self, output_text: str) -> None:
-        """Update the output of the current history entry."""
-        if 0 <= self.current_index < len(self.history):
-            self.history[self.current_index]["output"] = output_text
 
+    def load(self) -> None:
+        try:
+            if self.HISTORY_FILE.exists():
+                with open(self.HISTORY_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.history = data.get("history", [])
+                if len(self.history) > self.max_size:
+                    self.history = self.history[-self.max_size :]
+                if self.history:
+                    self.current_index = len(self.history) - 1
+                logger.info(f"Loaded {len(self.history)} history entries")
+        except Exception as e:
+            logger.error(f"Failed to load history: {e}")
+            self.history = []
+            self.current_index = -1
+
+    def save(self) -> None:
+        try:
+            with open(self.HISTORY_FILE, "w", encoding="utf-8") as f:
+                json.dump({"history": self.history}, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Failed to save history: {e}")
+
+
+# -----------------------------
+# Server Manager
+# -----------------------------
 
 class ServerManager:
-    """Manages Fabric server process and health monitoring."""
-    
-    def __init__(self, fabric_command: str = "fabric", base_url: str = "http://localhost:8080"):
+    def __init__(self, fabric_command: str, base_url: str, port_flag: str):
         self.fabric_command = fabric_command
-        self.base_url = base_url
+        self.base_url = self._normalize_base_url(base_url)
+        self.port_flag = port_flag.strip() if port_flag else "--address"
+
         self.process: Optional[subprocess.Popen] = None
         self.is_online = False
-        self._health_check_thread: Optional[threading.Thread] = None
-        self._stop_health_check = False
-    
+
+        self._health_thread: Optional[threading.Thread] = None
+        self._stop_health = False
+
+        self._server_log_thread: Optional[threading.Thread] = None
+        self._server_log_stop = False
+        self.last_server_lines: List[str] = []
+
+    @staticmethod
+    def _normalize_base_url(url: str) -> str:
+        url = (url or "").strip()
+        if not url:
+            raise ValueError("Base URL cannot be empty")
+        if url.endswith("/"):
+            url = url[:-1]
+        return url
+
+    @staticmethod
+    def _port_from_base_url(base_url: str) -> int:
+        parsed = urlparse(base_url)
+        if parsed.port:
+            return int(parsed.port)
+        if parsed.scheme == "https":
+            return 443
+        return 80
+
+    def set_base_url(self, base_url: str) -> None:
+        self.base_url = self._normalize_base_url(base_url)
+
+    def check_health(self) -> bool:
+        try:
+            resp = requests.get(f"{self.base_url}/config", timeout=2)
+            healthy = resp.status_code == 200
+            self.is_online = healthy
+            return healthy
+        except Exception:
+            self.is_online = False
+            return False
+
+    def start_health_monitoring(self, interval: int, callback: Optional[callable] = None) -> None:
+        if self._health_thread and self._health_thread.is_alive():
+            return
+
+        self._stop_health = False
+
+        def _loop():
+            while not self._stop_health:
+                online = self.check_health()
+                if callback:
+                    try:
+                        callback(online)
+                    except Exception:
+                        pass
+                time.sleep(max(1, int(interval)))
+
+        self._health_thread = threading.Thread(target=_loop, daemon=True)
+        self._health_thread.start()
+        logger.info(f"Health monitoring started (interval: {interval}s)")
+
+    def stop_health_monitoring(self) -> None:
+        self._stop_health = True
+        if self._health_thread:
+            self._health_thread.join(timeout=2)
+
+    def _start_server_output_capture(self) -> None:
+        if not self.process or not self.process.stdout:
+            return
+
+        self._server_log_stop = False
+        self.last_server_lines = []
+
+        def _reader():
+            try:
+                while not self._server_log_stop:
+                    line = self.process.stdout.readline()
+                    if not line:
+                        break
+                    line = line.rstrip("\r\n")
+                    if not line:
+                        continue
+                    self.last_server_lines.append(line)
+                    if len(self.last_server_lines) > 50:
+                        self.last_server_lines.pop(0)
+                    logger.info(f"[fabric --serve] {line}")
+            except Exception as e:
+                logger.error(f"Server output capture error: {e}")
+
+        self._server_log_thread = threading.Thread(target=_reader, daemon=True)
+        self._server_log_thread.start()
+
     def start_server(self) -> bool:
-        """Start the Fabric server process in a new console window."""
         if self.process and self.process.poll() is None:
             logger.warning("Server is already running")
             return False
-        
+
+        # Safety: if somehow still set to --port, auto-correct at runtime
+        if self.port_flag.strip() == "--port":
+            self.port_flag = "--address"
+
+        port = self._port_from_base_url(self.base_url)
+
         try:
-            # Resolve full path to fabric
-            import shutil
             fabric_path = shutil.which(self.fabric_command)
             if not fabric_path:
                 logger.error(f"Fabric command not found: {self.fabric_command}")
                 return False
-                
-            logger.info(f"Starting Fabric server in new console: {fabric_path} --serve")
-            
-            # Configure startup info to minimize the window
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = 7  # SW_SHOWMINNOACTIVE
-            
-            # Start server process in a new visible console window
-            # This mimics the user manually opening a terminal, which we know works.
-            # We do NOT pipe stdout/stderr, so it appears in the new window.
+
+            # Fabric expects --address ':PORT' (leading colon)
+            address_value = f":{port}"
+            cmd = [fabric_path, "--serve", self.port_flag, address_value]
+            logger.info(f"Starting Fabric server: {' '.join(cmd)} (base_url={self.base_url})")
+
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+
             self.process = subprocess.Popen(
-                [fabric_path, "--serve"],
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
-                startupinfo=startupinfo,
-                close_fds=True
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=creationflags,
             )
-            
+
             logger.info(f"Server process started with PID: {self.process.pid}")
-            
-            # Wait a moment for server to initialize
+            self._start_server_output_capture()
+
             time.sleep(2)
-            
-            # Check if process is still running
             if self.process.poll() is not None:
                 logger.error("Server process terminated immediately")
                 return False
-            
+
             return True
-        
+
         except Exception as e:
             logger.error(f"Failed to start server: {e}")
             return False
-    
+
     def stop_server(self, timeout: int = 5) -> bool:
-        """Stop the Fabric server process."""
         if not self.process or self.process.poll() is not None:
-            logger.info("Server is not running")
-            return True
-        
-        try:
-            logger.info(f"Stopping server (PID: {self.process.pid})")
-            
-            # Try graceful shutdown first
-            if os.name == 'nt':
-                # Windows: send CTRL_BREAK_EVENT
-                self.process.send_signal(signal.CTRL_BREAK_EVENT)
-            else:
-                # Unix: send SIGTERM
-                self.process.terminate()
-            
-            # Wait for process to exit
-            try:
-                self.process.wait(timeout=timeout)
-                logger.info("Server stopped gracefully")
-            except subprocess.TimeoutExpired:
-                logger.warning("Server did not stop gracefully, forcing...")
-                self.process.kill()
-                self.process.wait()
-                logger.info("Server force-stopped")
-            
             self.process = None
             self.is_online = False
             return True
-        
+
+        try:
+            pid = self.process.pid
+            logger.info(f"Stopping server (PID: {pid})")
+
+            self._server_log_stop = True
+
+            if os.name == "nt":
+                self.process.terminate()
+            else:
+                self.process.terminate()
+
+            try:
+                self.process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                logger.warning("Server did not stop gracefully, forcing kill")
+                self.process.kill()
+                self.process.wait()
+
+            self.process = None
+            self.is_online = False
+            return True
+
         except Exception as e:
             logger.error(f"Failed to stop server: {e}")
             return False
-    
-    def check_health(self) -> bool:
-        """Check if server is responding."""
-        try:
-            resp = requests.get(f"{self.base_url}/config", timeout=2)
-            is_healthy = resp.status_code == 200
-            
-            if is_healthy != self.is_online:
-                logger.info(f"Server status changed: {'online' if is_healthy else 'offline'}")
-            
-            self.is_online = is_healthy
-            return is_healthy
-        
-        except Exception:
-            if self.is_online:
-                logger.info("Server is offline")
-            self.is_online = False
-            return False
-    
-    def start_health_monitoring(self, interval: int = 5, callback: Optional[callable] = None):
-        """Start periodic health checks in background thread."""
-        if self._health_check_thread and self._health_check_thread.is_alive():
-            return
-        
-        self._stop_health_check = False
-        
-        def monitor():
-            while not self._stop_health_check:
-                self.check_health()
-                if callback:
-                    callback(self.is_online)
-                time.sleep(interval)
-        
-        self._health_check_thread = threading.Thread(target=monitor, daemon=True)
-        self._health_check_thread.start()
-        logger.info(f"Health monitoring started (interval: {interval}s)")
 
     def get_patterns(self) -> Optional[List[str]]:
-        """Get list of available patterns from server."""
         try:
-            # Try to fetch patterns from the server
-            # Valid endpoint is /patterns/names
             resp = requests.get(f"{self.base_url}/patterns/names", timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, list):
-                    return sorted(data)
-                return sorted(data.get("patterns", []))
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            if isinstance(data, list):
+                return sorted(data)
+            if isinstance(data, dict):
+                patterns = data.get("patterns", [])
+                if isinstance(patterns, list):
+                    return sorted(patterns)
             return []
         except Exception as e:
             logger.error(f"Failed to get patterns: {e}")
             return None
 
     def get_models(self) -> Dict[str, List[str]]:
-        """Get list of available models from fabric CLI."""
         try:
-            # Run fabric --listmodels
-            import shutil
             fabric_path = shutil.which(self.fabric_command)
             if not fabric_path:
                 return {}
 
-            # Run command
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = subprocess.CREATE_NO_WINDOW
+
             result = subprocess.run(
                 [fabric_path, "--listmodels"],
                 capture_output=True,
                 text=True,
-                encoding='utf-8',
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creationflags,
             )
-            
             if result.returncode != 0:
-                logger.error(f"Failed to list models: {result.stderr}")
+                logger.error(f"Failed to list models: {result.stderr.strip()}")
                 return {}
 
-            models_by_provider = {}
-            
-            # Parse output
-            # Format: [index] Provider|Model or just Model
+            models_by_provider: Dict[str, List[str]] = {}
             for line in result.stdout.splitlines():
                 line = line.strip()
                 if not line:
                     continue
-                
-                # Strip index like [123]
-                import re
-                # Match [123] at start, allowing for whitespace
-                match = re.match(r'^\[\d+\]\s*(.*)$', line)
-                if match:
-                    content = match.group(1).strip()
-                    
-                    if '|' in content:
-                        provider, model = content.split('|', 1)
-                        provider = provider.strip()
-                        model = model.strip()
-                    else:
-                        provider = "Other"
-                        model = content.strip()
-                        
-                    if provider not in models_by_provider:
-                        models_by_provider[provider] = []
-                    models_by_provider[provider].append(model)
-            
-            return models_by_provider
-            
+                m = re.match(r"^\[\d+\]\s*(.*)$", line)
+                if not m:
+                    continue
+                content = m.group(1).strip()
+
+                if "|" in content:
+                    provider, model = content.split("|", 1)
+                    provider = provider.strip() or "Other"
+                    model = model.strip()
+                else:
+                    provider = "Other"
+                    model = content.strip()
+
+                if not model:
+                    continue
+                models_by_provider.setdefault(provider, []).append(model)
+
+            for k in list(models_by_provider.keys()):
+                models_by_provider[k] = sorted(list(dict.fromkeys(models_by_provider[k])))
+
+            return dict(sorted(models_by_provider.items(), key=lambda kv: kv[0].lower()))
+
         except Exception as e:
             logger.error(f"Error getting models: {e}")
             return {}
 
     def get_default_model(self) -> Optional[str]:
-        """Get default model from Fabric config."""
         try:
-            # Config is usually at ~/.config/fabric/.env
             config_path = Path.home() / ".config" / "fabric" / ".env"
-            
             if not config_path.exists():
                 return None
-                
-            # Read file
-            with open(config_path, "r", encoding="utf-8") as f:
-                content = f.read()
-                
-            # Parse DEFAULT_MODEL=...
-            import re
-            match = re.search(r'^DEFAULT_MODEL=(.+)$', content, re.MULTILINE)
-            if match:
-                return match.group(1).strip()
-                
+            content = config_path.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r"^DEFAULT_MODEL=(.+)$", content, re.MULTILINE)
+            if m:
+                return m.group(1).strip()
             return None
-            
         except Exception as e:
             logger.error(f"Error getting default model: {e}")
             return None
 
-    def normalize_base_url(self, url: str) -> str:
-        """Normalize and validate base URL."""
-        url = url.strip()
-        if not url:
-            raise ValueError("Base URL cannot be empty")
-        
-        if url.endswith("/"):
-            url = url[:-1]
-            
-        return url
-    
-    def stop_health_monitoring(self):
-        """Stop health check monitoring."""
-        self._stop_health_check = True
-        if self._health_check_thread:
-            self._health_check_thread.join(timeout=2)
-        logger.info("Health monitoring stopped")
-    
-    def get_status(self) -> Dict[str, Any]:
-        """Get current server status."""
-        return {
-            "is_online": self.is_online,
-            "process_running": self.process is not None and self.process.poll() is None,
-            "pid": self.process.pid if self.process else None
-        }
-    
     def is_running(self) -> bool:
-        """Check if server is running (process exists and is online)."""
         return self.is_online
 
 
+# -----------------------------
+# Context Menu
+# -----------------------------
+
 class ContextMenu:
-    """Standard right-click context menu for text widgets."""
-    
     def __init__(self, widget: tk.Widget):
         self.widget = widget
         self.menu = tk.Menu(widget, tearoff=0)
-        self.menu.add_command(label="Cut", command=self._cut)
-        self.menu.add_command(label="Copy", command=self._copy)
-        self.menu.add_command(label="Paste", command=self._paste)
+        self.menu.add_command(label="Cut", command=lambda: self._gen("<<Cut>>"))
+        self.menu.add_command(label="Copy", command=lambda: self._gen("<<Copy>>"))
+        self.menu.add_command(label="Paste", command=lambda: self._gen("<<Paste>>"))
         self.menu.add_separator()
         self.menu.add_command(label="Select All", command=self._select_all)
-        
-        # Bind right-click event
-        widget.bind("<Button-3>", self._show_menu)
-        
-    def _show_menu(self, event):
-        """Show the context menu."""
-        # Check if widget is read-only or disabled
-        state = str(self.widget.cget("state"))
-        is_readonly = state == "disabled" or (hasattr(self.widget, "cget") and self.widget.cget("state") == "readonly")
-        
-        # Enable/disable items based on state and content
-        if is_readonly:
-            self.menu.entryconfig("Cut", state="disabled")
-            self.menu.entryconfig("Paste", state="disabled")
-        else:
-            self.menu.entryconfig("Cut", state="normal")
-            self.menu.entryconfig("Paste", state="normal")
-            
-        # Check if there is a selection for Copy/Cut
-        try:
-            has_selection = bool(self.widget.selection_get())
-        except tk.TclError:
-            has_selection = False
-            
-        self.menu.entryconfig("Copy", state="normal" if has_selection else "disabled")
-        if not is_readonly:
-            self.menu.entryconfig("Cut", state="normal" if has_selection else "disabled")
-            
-        self.menu.tk_popup(event.x_root, event.y_root)
-        
-    def _cut(self):
-        """Cut selection."""
-        try:
-            self.widget.event_generate("<<Cut>>")
-        except tk.TclError:
-            pass
-            
-    def _copy(self):
-        """Copy selection."""
-        try:
-            self.widget.event_generate("<<Copy>>")
-        except tk.TclError:
-            pass
-            
-    def _paste(self):
-        """Paste from clipboard."""
-        try:
-            self.widget.event_generate("<<Paste>>")
-        except tk.TclError:
-            pass
-            
-    def _select_all(self):
-        """Select all text."""
-        self.widget.focus_force()
-        self.widget.event_generate("<<SelectAll>>")
-        # Fallback for widgets that might not support <<SelectAll>> natively or correctly
-        if isinstance(self.widget, (tk.Text, scrolledtext.ScrolledText)):
-            self.widget.tag_add("sel", "1.0", "end")
-        elif isinstance(self.widget, tk.Entry):
-            self.widget.select_range(0, "end")
+        widget.bind("<Button-3>", self._show)
 
+    def _gen(self, ev: str) -> None:
+        try:
+            self.widget.event_generate(ev)
+        except Exception:
+            pass
+
+    def _select_all(self) -> None:
+        try:
+            self.widget.focus_force()
+            if isinstance(self.widget, tk.Text):
+                self.widget.tag_add("sel", "1.0", "end")
+            elif isinstance(self.widget, tk.Entry):
+                self.widget.select_range(0, "end")
+        except Exception:
+            pass
+
+    def _show(self, event) -> None:
+        try:
+            state = str(self.widget.cget("state"))
+        except Exception:
+            state = "normal"
+
+        readonly = state in ("disabled", "readonly")
+        self.menu.entryconfig("Cut", state="disabled" if readonly else "normal")
+        self.menu.entryconfig("Paste", state="disabled" if readonly else "normal")
+
+        try:
+            _ = self.widget.selection_get()
+            has_sel = True
+        except Exception:
+            has_sel = False
+
+        self.menu.entryconfig("Copy", state="normal" if has_sel else "disabled")
+        if not readonly:
+            self.menu.entryconfig("Cut", state="normal" if has_sel else "disabled")
+
+        self.menu.tk_popup(event.x_root, event.y_root)
+
+
+# -----------------------------
+# GUI
+# -----------------------------
 
 class FabricGUI(ctk.CTk):
-    """Main application window for Fabric GUI."""
-    
     def __init__(self):
         super().__init__()
-        
-        # Configure CustomTkinter
+
         ctk.set_appearance_mode("System")
         ctk.set_default_color_theme("blue")
-        
-        # Load configuration
+
         self.app_config = ConfigManager.load()
-        
-        # Initialize history
         self.history = OutputHistory()
-        
-        # Configure ttk style for Combobox
+
+        # ttk combobox styling
         style = ttk.Style()
-        style.theme_use('clam')
-        style.configure("TCombobox", 
-            fieldbackground="#333333", 
-            background="#333333", 
-            foreground="white", 
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure(
+            "TCombobox",
+            fieldbackground="#333333",
+            background="#333333",
+            foreground="white",
             arrowcolor="white",
             bordercolor="#333333",
-            darkcolor="#333333",
-            lightcolor="#333333",
-            font=("Roboto", 12)
+            font=("Roboto", 12),
         )
-        style.map("TCombobox", 
-            fieldbackground=[("readonly", "#333333")], 
-            selectbackground=[("readonly", "#1f538d")], 
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", "#333333")],
+            selectbackground=[("readonly", "#1f538d")],
             selectforeground=[("readonly", "white")],
-            background=[("readonly", "#333333")]
         )
-        # Configure dropdown listbox style (requires option_add)
-        self.option_add('*TCombobox*Listbox.background', '#333333')
-        self.option_add('*TCombobox*Listbox.foreground', 'white')
-        self.option_add('*TCombobox*Listbox.selectBackground', '#1f538d')
-        self.option_add('*TCombobox*Listbox.selectForeground', 'white')
-        
-        # Initialize server manager
+        self.option_add("*TCombobox*Listbox.background", "#333333")
+        self.option_add("*TCombobox*Listbox.foreground", "white")
+        self.option_add("*TCombobox*Listbox.selectBackground", "#1f538d")
+        self.option_add("*TCombobox*Listbox.selectForeground", "white")
+
         self.server_manager = ServerManager(
             fabric_command=self.app_config["fabric_command"],
-            base_url=self.app_config["base_url"]
+            base_url=self.app_config["base_url"],
+            port_flag=self.app_config.get("port_flag", "--address"),
         )
-        
-        # Request cancellation
+
+        # runtime state
         self.cancel_request = False
         self.current_request_thread: Optional[threading.Thread] = None
-        self.current_process = None  # For subprocess execution
+        self.current_process: Optional[subprocess.Popen] = None
         
-        # UI Variables
+        # Progress animation state
+        self._progress_animation_id: Optional[str] = None
+        self._progress_dot_count = 0
+        self._progress_colors = ["#FFD700", "#FFA500", "#FF8C00", "#FFA500"]  # Gold pulsing
+        self._progress_color_index = 0
+
+        # tk vars
         self.base_url_var = tk.StringVar(value=self.app_config["base_url"])
-        self.api_key_var = tk.StringVar(value=self.app_config["api_key"])
         self.pattern_var = tk.StringVar(value=self.app_config["last_pattern"])
+        self.pattern_search_var = tk.StringVar(value="")
+        self.model_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Ready")
         self.command_var = tk.StringVar(value="")
-        
-        # Update command preview when pattern changes
+
+        self.all_patterns: List[str] = []
+        self.last_valid_model = ""
+
         self.pattern_var.trace_add("write", self._update_command_preview)
-        self._update_command_preview()  # Initialize command preview
-        
-        # Setup window
-        self.title("Fabric Mini GUI")
-        self.geometry(self.app_config["window_geometry"])
+        self.model_var.trace_add("write", self._update_command_preview)
+        self.pattern_search_var.trace_add("write", self._filter_patterns)
+
+        self.title("Fabric GUI")
+        self.geometry(self.app_config.get("window_geometry", DEFAULT_WINDOW_SIZE))
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
-        # Build UI
+
         self._build_menu()
         self._build_server_frame()
         self._build_pattern_frame()
         self._build_info_frame()
         self._build_io_frame()
-        
-        # Keyboard shortcuts
         self._setup_shortcuts()
-        
-        # Start health monitoring
+
         self.server_manager.start_health_monitoring(
-            interval=self.app_config["server_health_check_interval"],
-            callback=self._on_server_status_change
+            interval=int(self.app_config.get("server_health_check_interval", SERVER_HEALTH_CHECK_INTERVAL)),
+            callback=self._on_server_status_change,
         )
-        
-        # Auto-start server if configured
-        if self.app_config["auto_start_server"]:
-            self.after(1000, self._auto_start_server)
-        
-        # Load patterns automatically on start
-        self.after(500, self.load_patterns)
-        
+
+        if self.app_config.get("auto_start_server", False):
+            self.after(600, self.on_start_server)
+
+        self.after(800, self.load_patterns)
+        self.after(1200, self.load_models)
+
+        self._update_command_preview()
         logger.info("Fabric GUI started")
-    
+
     # -----------------------------
-    # UI Construction
+    # UI Building
     # -----------------------------
-    
-    def _build_menu(self):
-        """Build menu bar."""
-        # CustomTkinter doesn't have a native menu bar, so we keep tk.Menu for now.
-        # It works on Windows.
+
+    def _build_menu(self) -> None:
         menubar = tk.Menu(self)
         self.config(menu=menubar)
-        
-        # File menu
+
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(label="Save Output...", command=self.save_output, accelerator="Ctrl+S")
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.on_closing)
-        
-        # Edit menu
+
         edit_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Edit", menu=edit_menu)
         edit_menu.add_command(label="Copy Output", command=self.copy_output, accelerator="Ctrl+C")
@@ -581,1089 +832,847 @@ class FabricGUI(ctk.CTk):
         edit_menu.add_separator()
         edit_menu.add_command(label="Paste Input", command=self.paste_input)
         edit_menu.add_command(label="Clear Input", command=self.clear_input)
-        
-        # History menu
+
         history_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="History", menu=history_menu)
         history_menu.add_command(label="Previous", command=self.history_previous, accelerator="Alt+Left")
         history_menu.add_command(label="Next", command=self.history_next, accelerator="Alt+Right")
-        
-        # Help menu
+
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="User Guide", command=self.show_help)
         help_menu.add_command(label="View Logs", command=self.view_logs)
+        help_menu.add_separator()
         help_menu.add_command(label="About", command=self.show_about)
-    
-    def _build_server_frame(self):
-        """Build server configuration frame with status LED and controls."""
-        # Using CTkFrame instead of LabelFrame (not available in ctk)
+
+    def _build_server_frame(self) -> None:
         frame = ctk.CTkFrame(self)
         frame.pack(fill="x", padx=10, pady=5)
-        
-        # Title for the frame (simulating LabelFrame)
-        title_label = ctk.CTkLabel(frame, text="Server Configuration", font=("Roboto", 14, "bold"))
-        title_label.grid(row=0, column=0, columnspan=8, sticky="w", padx=10, pady=(5, 0))
-        
-        # Content container
-        content_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        content_frame.grid(row=1, column=0, columnspan=8, sticky="ew", padx=5, pady=5)
-        
-        # LED Status Indicator
-        led_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
+
+        title = ctk.CTkLabel(frame, text="Server Configuration", font=FONT_HEADING)
+        title.grid(row=0, column=0, columnspan=10, sticky="w", padx=10, pady=(6, 0))
+
+        content = ctk.CTkFrame(frame, fg_color="transparent")
+        content.grid(row=1, column=0, columnspan=10, sticky="ew", padx=5, pady=6)
+
+        led_frame = ctk.CTkFrame(content, fg_color="transparent")
         led_frame.pack(side="left", padx=5)
-        
+
         ctk.CTkLabel(led_frame, text="Status:").pack(side="left", padx=(0, 5))
-        
         self.status_led = tk.Canvas(led_frame, width=20, height=20, highlightthickness=0, bg="black")
         self.status_led.pack(side="left")
         self.led_indicator = self.status_led.create_oval(2, 2, 18, 18, fill="red", outline="darkred")
-        
-        # Tooltip for LED
         self._create_tooltip(self.status_led, "Server: Offline")
-        
-        # Base URL
-        ctk.CTkLabel(content_frame, text="Base URL:").pack(side="left", padx=5)
-        entry_url = ctk.CTkEntry(content_frame, textvariable=self.base_url_var, width=200)
-        entry_url.pack(side="left", padx=5)
-        self._add_context_menu(entry_url)
-        
-        # API Key
-        ctk.CTkLabel(content_frame, text="API Key:").pack(side="left", padx=5)
-        entry_key = ctk.CTkEntry(content_frame, textvariable=self.api_key_var, width=150, show="*")
-        entry_key.pack(side="left", padx=5)
-        self._add_context_menu(entry_key)
-        
-        # Control buttons
-        btn_test = ctk.CTkButton(content_frame, text="Test", command=self.on_test_server, width=60)
+
+        ctk.CTkLabel(content, text="Base URL:").pack(side="left", padx=5)
+        self.entry_url = ctk.CTkEntry(content, textvariable=self.base_url_var, width=280)
+        self.entry_url.pack(side="left", padx=5)
+        ContextMenu(self.entry_url)
+
+        btn_test = ctk.CTkButton(content, text="Test", command=self.on_test_server, width=70)
         btn_test.pack(side="left", padx=5)
-        
-        self.btn_start_server = ctk.CTkButton(content_frame, text="Start", command=self.on_start_server, width=60)
+
+        self.btn_start_server = ctk.CTkButton(content, text="Start", command=self.on_start_server, width=70)
         self.btn_start_server.pack(side="left", padx=5)
-        
-        self.btn_stop_server = ctk.CTkButton(content_frame, text="Stop", command=self.on_stop_server, width=60, state="disabled")
+
+        self.btn_stop_server = ctk.CTkButton(content, text="Stop", command=self.on_stop_server, width=70, state="disabled")
         self.btn_stop_server.pack(side="left", padx=5)
-    
-    def _create_tooltip(self, widget, text):
-        """Create a tooltip for a widget."""
-        # Store initial tooltip text
-        widget.tooltip_text = text
-        
-        def on_enter(event):
-            tooltip = tk.Toplevel()
-            tooltip.wm_overrideredirect(True)
-            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
-            # Use stored tooltip text
-            tooltip_text = getattr(widget, 'tooltip_text', text)
-            label = tk.Label(tooltip, text=tooltip_text, background="lightyellow", relief="solid", borderwidth=1)
-            label.pack()
-            widget.tooltip = tooltip
-        
-        def on_leave(event):
-            if hasattr(widget, 'tooltip'):
-                widget.tooltip.destroy()
-                del widget.tooltip
-        
-        widget.bind("<Enter>", on_enter)
-        widget.bind("<Leave>", on_leave)
-    
-    def _add_context_menu(self, widget):
-        """Add context menu to a widget."""
-        ContextMenu(widget)
-    
-    def _build_pattern_frame(self):
-        """Build pattern selection frame."""
+
+    def _build_pattern_frame(self) -> None:
         frame = ctk.CTkFrame(self)
         frame.pack(fill="x", padx=10, pady=5)
-        
-        # Title
-        ctk.CTkLabel(frame, text="Pattern Selection", font=("Roboto", 14, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", padx=10, pady=(5, 0))
-        
-        # Content
-        content_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        content_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
-        
-        ctk.CTkLabel(content_frame, text="Pattern:").pack(side="left", padx=5)
-        
-        # Use ttk.Combobox for native scrollbar support
-        self.pattern_combo = ttk.Combobox(
-            content_frame, 
-            textvariable=self.pattern_var, 
-            width=40,
-            state="readonly",
-            height=40
+
+        ctk.CTkLabel(frame, text="Pattern Selection", font=FONT_HEADING).grid(
+            row=0, column=0, columnspan=6, sticky="w", padx=10, pady=(6, 0)
         )
+
+        search_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        search_frame.grid(row=1, column=0, columnspan=6, sticky="ew", padx=5, pady=(6, 0))
+
+        ctk.CTkLabel(search_frame, text="Search:").pack(side="left", padx=5)
+        search_entry = ctk.CTkEntry(search_frame, textvariable=self.pattern_search_var, placeholder_text="Filter patterns...")
+        search_entry.pack(side="left", padx=5, fill="x", expand=True)
+
+        row2 = ctk.CTkFrame(frame, fg_color="transparent")
+        row2.grid(row=2, column=0, columnspan=6, sticky="ew", padx=5, pady=6)
+
+        ctk.CTkLabel(row2, text="Pattern:").pack(side="left", padx=5)
+
+        self.pattern_combo = ttk.Combobox(row2, textvariable=self.pattern_var, width=45, state="readonly", height=20)
         self.pattern_combo.pack(side="left", padx=5, fill="x", expand=True)
-        
-        # Note: ttk.Combobox has native scrolling, no need for custom binding
-        
-        btn_load = ctk.CTkButton(content_frame, text="Refresh Patterns", command=self.load_patterns)
-        btn_load.pack(side="left", padx=5)
-        
-        # Model Selection
-        model_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        model_frame.grid(row=2, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
-        
-        ctk.CTkLabel(model_frame, text="Model:").pack(side="left", padx=5)
-        
-        self.model_var = tk.StringVar()
-        self.model_combo = ttk.Combobox(
-            model_frame,
-            textvariable=self.model_var,
-            width=40,
-            state="readonly",
-            height=40
-        )
+
+        btn_refresh = ctk.CTkButton(row2, text="Refresh Patterns", command=self.load_patterns)
+        btn_refresh.pack(side="left", padx=5)
+
+        model_row = ctk.CTkFrame(frame, fg_color="transparent")
+        model_row.grid(row=3, column=0, columnspan=6, sticky="ew", padx=5, pady=(0, 8))
+
+        ctk.CTkLabel(model_row, text="Model:").pack(side="left", padx=5)
+
+        self.model_combo = ttk.Combobox(model_row, textvariable=self.model_var, width=45, state="readonly", height=20)
         self.model_combo.pack(side="left", padx=5, fill="x", expand=True)
         self.model_combo.bind("<<ComboboxSelected>>", self._on_model_selected)
-        
-        # Default Model Label
-        self.default_model_label = ctk.CTkLabel(
-            model_frame, 
-            text="Default: (loading...)", 
-            text_color="gray",
-            cursor="hand2"
-        )
-        self.default_model_label.pack(side="left", padx=5)
-        
-        # Bind click and hover events
-        self.default_model_label.bind("<Button-1>", lambda e: self.reset_model_selection())
-        self.default_model_label.bind("<Enter>", lambda e: self.default_model_label.configure(text_color="#3B8ED0")) # Blue on hover
-        self.default_model_label.bind("<Leave>", lambda e: self.default_model_label.configure(text_color="gray"))
-        
-        frame.columnconfigure(0, weight=1)
-        
-        # Load models
-        self.after(1000, self.load_models)
 
-    def reset_model_selection(self):
-        """Reset model selection to default."""
-        self.model_var.set("")
-        self._update_command_preview()
-        self.status_var.set("Model reset to default")
-        # Flash the label to indicate action
-        original_color = self.default_model_label.cget("text_color")
-        self.default_model_label.configure(text_color="green")
-        self.after(300, lambda: self.default_model_label.configure(text_color="gray"))
-    
-    def _build_info_frame(self):
-        """Build info frame with status and command preview."""
+        self.default_model_label = ctk.CTkLabel(model_row, text="Default: (loading...)", text_color="gray", cursor="hand2")
+        self.default_model_label.pack(side="left", padx=8)
+        self.default_model_label.bind("<Button-1>", lambda e: self.reset_model_selection())
+
+        frame.columnconfigure(0, weight=1)
+
+    def _build_info_frame(self) -> None:
         frame = ctk.CTkFrame(self)
         frame.pack(fill="x", padx=10, pady=5)
-        
-        # Status
-        status_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        status_frame.pack(side="left", fill="x", expand=True, padx=5, pady=5)
-        
-        ctk.CTkLabel(status_frame, text="Status", font=("Roboto", 14, "bold")).pack(anchor="w")
-        self.status_label = ctk.CTkLabel(
-            status_frame, 
-            textvariable=self.status_var, 
-            font=("Segoe UI", 14, "bold"),
-            text_color=("#3B8ED0", "#1F6AA5") # Adaptive blue
-        )
-        self.status_label.pack(fill="x", pady=2)
-        
-        # Command Preview
-        cmd_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        cmd_frame.pack(side="left", fill="x", expand=True, padx=5, pady=5)
-        
-        ctk.CTkLabel(cmd_frame, text="Command Preview", font=("Roboto", 14, "bold")).pack(anchor="w")
-        cmd_entry = ctk.CTkEntry(
-            cmd_frame, 
-            textvariable=self.command_var, 
-            state="readonly",
-            font=("Consolas", 12)
-        )
-        cmd_entry.pack(fill="x", pady=2)
-        
-        # Actions
-        action_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        action_frame.pack(side="left", padx=5, pady=5)
-        
-        ctk.CTkLabel(action_frame, text="Actions", font=("Roboto", 14, "bold")).pack(anchor="w")
-        
-        button_container = ctk.CTkFrame(action_frame, fg_color="transparent")
-        button_container.pack(fill="x", pady=2)
-        
-        self.btn_cancel = ctk.CTkButton(
-            button_container, 
-            text="Cancel", 
-            command=self.on_cancel,
-            state="disabled",
-            fg_color="transparent", border_width=2, text_color=("gray10", "#DCE4EE")
-        )
-        self.btn_cancel.pack(side="left", padx=2)
-        
-        self.btn_send = ctk.CTkButton(
-            button_container, 
-            text="Send", 
-            command=self.on_send,
-            width=100,
-            fg_color="green",
-            hover_color="darkgreen"
-        )
-        self.btn_send.pack(side="left", padx=2)
-    
-    def _update_command_preview(self, *args):
-        """Update the command preview based on current pattern."""
-        pattern = self.pattern_var.get()
-        cmd = self.app_config['fabric_command']
-        
-        if pattern:
-            cmd += f" -p {pattern}"
-            
-        # Add model if selected
-        if hasattr(self, 'model_var'):
-            model_selection = self.model_var.get()
-            if model_selection and not model_selection.endswith("(Default)"):
-                # Extract model name from selection (strip indentation)
-                model_name = model_selection.strip()
-                # If it's a provider header (no indentation), ignore it in preview?
-                # But our selection logic should prevent selecting headers.
-                if model_name and not model_selection.startswith(" "): # It's a header
-                     pass 
-                elif model_name:
-                    cmd += f" -m {model_name}"
-                    
-        self.command_var.set(cmd)
-    
-    def _add_context_menu(self, widget):
-        """Add context menu to a widget."""
-        menu = tk.Menu(widget, tearoff=0)
-        menu.add_command(label="Cut", command=lambda: widget.event_generate("<<Cut>>"))
-        menu.add_command(label="Copy", command=lambda: widget.event_generate("<<Copy>>"))
-        menu.add_command(label="Paste", command=lambda: widget.event_generate("<<Paste>>"))
-        menu.add_separator()
-        menu.add_command(label="Select All", command=lambda: widget.event_generate("<<SelectAll>>"))
-        
-        def show_menu(event):
-            menu.tk_popup(event.x_root, event.y_root)
-            return "break"
-            
-        widget.bind("<Button-3>", show_menu)
-        
-    def _create_tooltip(self, widget, text):
-        """Create a tooltip for a widget."""
-        widget.tooltip_text = text
-        
-        def enter(event):
-            text = getattr(widget, "tooltip_text", "")
-            if not text:
-                return
-                
-            x = widget.winfo_rootx() + 25
-            y = widget.winfo_rooty() + 25
-            
-            # Create tooltip window
-            self.tooltip = tk.Toplevel(widget)
-            self.tooltip.wm_overrideredirect(True)
-            self.tooltip.wm_geometry(f"+{x}+{y}")
-            
-            label = tk.Label(self.tooltip, text=text, justify='left',
-                           background="#ffffff", relief='solid', borderwidth=1,
-                           font=("tahoma", "10", "normal"))
-            label.pack(ipadx=1)
-            
-        def leave(event):
-            if hasattr(self, 'tooltip'):
-                self.tooltip.destroy()
-                del self.tooltip
-                
-        widget.bind("<Enter>", enter)
-        widget.bind("<Leave>", leave)
 
-    def _build_io_frame(self):
-        """Build input/output frame."""
+        left = ctk.CTkFrame(frame, fg_color="transparent")
+        left.pack(side="left", fill="x", expand=True, padx=5, pady=6)
+
+        ctk.CTkLabel(left, text="Status", font=FONT_HEADING).pack(anchor="w")
+        self.status_label = ctk.CTkLabel(left, textvariable=self.status_var, font=("Segoe UI", 14, "bold"))
+        self.status_label.pack(fill="x", pady=(2, 0))
+
+        mid = ctk.CTkFrame(frame, fg_color="transparent")
+        mid.pack(side="left", fill="x", expand=True, padx=5, pady=6)
+
+        ctk.CTkLabel(mid, text="Command Preview", font=FONT_HEADING).pack(anchor="w")
+        cmd_entry = ctk.CTkEntry(mid, textvariable=self.command_var, state="readonly", font=FONT_CODE)
+        cmd_entry.pack(fill="x", pady=(2, 0))
+
+        right = ctk.CTkFrame(frame, fg_color="transparent")
+        right.pack(side="left", padx=5, pady=6)
+
+        ctk.CTkLabel(right, text="Actions", font=FONT_HEADING).pack(anchor="w")
+
+        btns = ctk.CTkFrame(right, fg_color="transparent")
+        btns.pack(fill="x", pady=(2, 0))
+
+        self.btn_cancel = ctk.CTkButton(btns, text="Cancel", command=self.on_cancel, state="disabled")
+        self.btn_cancel.pack(side="left", padx=2)
+
+        self.btn_send = ctk.CTkButton(btns, text="Send", command=self.on_send, width=110, fg_color="green", hover_color="darkgreen")
+        self.btn_send.pack(side="left", padx=2)
+
+    def _build_io_frame(self) -> None:
         frame = ctk.CTkFrame(self)
         frame.pack(fill="both", expand=True, padx=10, pady=5)
-        
-        # Input section
+
         input_frame = ctk.CTkFrame(frame, fg_color="transparent")
         input_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
-        
-        ctk.CTkLabel(input_frame, text="Input", font=("Roboto", 14, "bold")).pack(anchor="w")
-        
-        # Input Toolbar
+
+        ctk.CTkLabel(input_frame, text="Input", font=FONT_HEADING).pack(anchor="w")
+
         input_toolbar = ctk.CTkFrame(input_frame, fg_color="transparent")
-        input_toolbar.pack(fill="x", pady=(0, 5))
-        
-        ctk.CTkButton(input_toolbar, text="Paste", command=self.paste_input, width=60).pack(side="left", padx=2)
-        ctk.CTkButton(input_toolbar, text="Clear", command=self.clear_input, width=60).pack(side="left", padx=2)
-        
-        self.input_text = ctk.CTkTextbox(
-            input_frame, 
-            wrap="word", 
-            font=("Consolas", 14)
-        )
+        input_toolbar.pack(fill="x", pady=(0, 6))
+
+        ctk.CTkButton(input_toolbar, text="Import", command=self.import_file, width=70).pack(side="left", padx=2)
+        ctk.CTkButton(input_toolbar, text="Paste", command=self.paste_input, width=70).pack(side="left", padx=2)
+        ctk.CTkButton(input_toolbar, text="Clear", command=self.clear_input, width=70).pack(side="left", padx=2)
+
+        self.input_text = ctk.CTkTextbox(input_frame, wrap="word", font=("Consolas", 14))
         self.input_text.pack(fill="both", expand=True, padx=2, pady=2)
-        # Bind context menu to internal text widget for correct event handling
-        self._add_context_menu(self.input_text._textbox)
-        
-        # Output section
+        ContextMenu(self.input_text._textbox)
+
         output_frame = ctk.CTkFrame(frame, fg_color="transparent")
         output_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
-        
-        ctk.CTkLabel(output_frame, text="Output", font=("Roboto", 14, "bold")).pack(anchor="w")
-        
-        # Output toolbar
+
+        ctk.CTkLabel(output_frame, text="Output", font=FONT_HEADING).pack(anchor="w")
+
         output_toolbar = ctk.CTkFrame(output_frame, fg_color="transparent")
-        output_toolbar.pack(fill="x", pady=(0, 5))
-        
-        ctk.CTkButton(output_toolbar, text="Copy", command=self.copy_output, width=60).pack(side="left", padx=2)
-        ctk.CTkButton(output_toolbar, text="Save", command=self.save_output, width=60).pack(side="left", padx=2)
-        ctk.CTkButton(output_toolbar, text="Clear", command=self.clear_output, width=60).pack(side="left", padx=2)
-        
-        # History navigation
-        ctk.CTkFrame(output_toolbar, width=2, height=20, fg_color="gray50").pack(side="left", padx=5)
-        
-        self.btn_history_prev = ctk.CTkButton(
-            output_toolbar, 
-            text="<", 
-            command=self.history_previous, 
-            width=30
-        )
+        output_toolbar.pack(fill="x", pady=(0, 6))
+
+        ctk.CTkButton(output_toolbar, text="Copy", command=self.copy_output, width=70).pack(side="left", padx=2)
+        ctk.CTkButton(output_toolbar, text="Save", command=self.save_output, width=70).pack(side="left", padx=2)
+        ctk.CTkButton(output_toolbar, text="Clear", command=self.clear_output, width=70).pack(side="left", padx=2)
+
+        sep = ctk.CTkFrame(output_toolbar, width=2, height=20, fg_color="gray50")
+        sep.pack(side="left", padx=8)
+
+        self.btn_history_prev = ctk.CTkButton(output_toolbar, text="<", command=self.history_previous, width=36)
         self.btn_history_prev.pack(side="left", padx=2)
-        
-        self.btn_history_next = ctk.CTkButton(
-            output_toolbar, 
-            text=">", 
-            command=self.history_next, 
-            width=30
-        )
+
+        self.btn_history_next = ctk.CTkButton(output_toolbar, text=">", command=self.history_next, width=36)
         self.btn_history_next.pack(side="left", padx=2)
-        
-        self.output_text = ctk.CTkTextbox(
-            output_frame, 
-            wrap="word", 
-            state="disabled",
-            font=("Consolas", 14)
-        )
+
+        self.output_text = ctk.CTkTextbox(output_frame, wrap="word", font=("Consolas", 14))
         self.output_text.pack(fill="both", expand=True, padx=2, pady=2)
-        # Bind context menu to internal text widget
-        self._add_context_menu(self.output_text._textbox)
-        
+        self.output_text.configure(state="disabled")
+        ContextMenu(self.output_text._textbox)
+
         self._update_history_buttons()
-    
-    def _setup_shortcuts(self):
-        """Setup keyboard shortcuts."""
+
+    def _setup_shortcuts(self) -> None:
         self.bind("<Control-s>", lambda e: self.save_output())
         self.bind("<Control-c>", lambda e: self.copy_output())
         self.bind("<Alt-Left>", lambda e: self.history_previous())
         self.bind("<Alt-Right>", lambda e: self.history_next())
         self.bind("<Control-Return>", lambda e: self.on_send())
-    
-    def _bind_mousewheel_to_combobox(self, combobox):
-        """Enable mouse wheel scrolling for combobox."""
-        def on_mousewheel(event):
-            values = combobox.cget("values")
-            if not values:
+
+    # -----------------------------
+    # Tooltip
+    # -----------------------------
+
+    def _create_tooltip(self, widget, text: str) -> None:
+        widget.tooltip_text = text
+
+        def on_enter(event):
+            t = getattr(widget, "tooltip_text", "")
+            if not t:
                 return
-            
-            current = combobox.get()
-            try:
-                index = list(values).index(current)
-            except ValueError:
-                index = 0
-            
-            # Scroll up or down
-            if event.delta > 0:  # Scroll up
-                index = max(0, index - 1)
-            else:  # Scroll down
-                index = min(len(values) - 1, index + 1)
-            
-            combobox.set(values[index])
-        
-        combobox.bind("<MouseWheel>", on_mousewheel)
-    
+            tip = tk.Toplevel()
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+            label = tk.Label(tip, text=t, background="lightyellow", relief="solid", borderwidth=1)
+            label.pack()
+            widget._tooltip = tip
+
+        def on_leave(event):
+            tip = getattr(widget, "_tooltip", None)
+            if tip:
+                try:
+                    tip.destroy()
+                except Exception:
+                    pass
+                widget._tooltip = None
+
+        widget.bind("<Enter>", on_enter)
+        widget.bind("<Leave>", on_leave)
+
+    def _update_tooltip_text(self, widget, text: str) -> None:
+        widget.tooltip_text = text
+
     # -----------------------------
-    # Helper Methods
+    # Core Helpers
     # -----------------------------
-    
-    def set_status(self, text: str):
-        """Update status bar text."""
+
+    def _normalize_base_url_from_entry(self) -> str:
+        url = (self.base_url_var.get() or "").strip()
+        if not url:
+            raise ValueError("Base URL cannot be empty")
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("Base URL must start with http:// or https://")
+        if any(c in url for c in [" ", "\n", "\r", "\t"]):
+            raise ValueError("Base URL cannot contain whitespace")
+        if url.endswith("/"):
+            url = url[:-1]
+        self.base_url_var.set(url)
+        return url
+
+    def _sync_server_manager_from_ui(self) -> None:
+        base_url = self._normalize_base_url_from_entry()
+        self.server_manager.set_base_url(base_url)
+
+    def _save_config_from_ui(self) -> None:
+        # Always persist corrected flag
+        if self.app_config.get("port_flag", "").strip() == "--port":
+            self.app_config["port_flag"] = "--address"
+
+        self.app_config["base_url"] = self.base_url_var.get().strip()
+        self.app_config["last_pattern"] = self.pattern_var.get()
+        self.app_config["last_model"] = (self.model_var.get().strip() if self.model_var.get().startswith("  ") else "")
+        self.app_config["window_geometry"] = self.geometry()
+        self.app_config["fabric_command"] = self.app_config.get("fabric_command", "fabric")
+        self.app_config["port_flag"] = self.app_config.get("port_flag", "--address")
+        ConfigManager.save(self.app_config)
+
+        # Keep runtime manager in sync with persisted flag too
+        self.server_manager.port_flag = self.app_config["port_flag"]
+
+    def _set_status(self, text: str) -> None:
         self.status_var.set(text)
         self.update_idletasks()
         logger.info(f"Status: {text}")
-    
-    def get_headers(self) -> Dict[str, str]:
-        """Get HTTP headers for requests."""
-        headers = {"Content-Type": "application/json"}
-        api_key = self.api_key_var.get().strip()
-        if api_key:
-            headers["X-API-Key"] = api_key
-        return headers
-    
-    def normalize_base_url(self) -> str:
-        """Normalize and validate base URL."""
-        url = self.base_url_var.get().strip()
-        
-        if not url:
-            raise ValueError("Base URL cannot be empty")
-        
-        if url.endswith("/"):
-            url = url[:-1]
-        
-        # Warn about HTTP (not HTTPS)
-        if url.startswith("http://") and "localhost" not in url and "127.0.0.1" not in url:
-            logger.warning("Using insecure HTTP connection")
-        
-        self.base_url_var.set(url)
-        return url
-    
-    def set_output_text(self, text: str):
-        """Set output text widget content."""
+
+    def _set_output_text(self, text: str) -> None:
         self.output_text.configure(state="normal")
         self.output_text.delete("1.0", "end")
         self.output_text.insert("1.0", text)
         self.output_text.configure(state="disabled")
-    
-    def set_ui_state(self, processing: bool):
-        """Enable/disable UI elements during processing."""
-        state = "disabled" if processing else "normal"
-        self.btn_send.configure(state=state)
+
+    def _append_output_text(self, text: str) -> None:
+        self.output_text.configure(state="normal")
+        self.output_text.insert("end", text)
+        self.output_text.see("end")
+        self.output_text.configure(state="disabled")
+
+    def _set_ui_processing(self, processing: bool) -> None:
+        self.btn_send.configure(state="disabled" if processing else "normal")
         self.btn_cancel.configure(state="normal" if processing else "disabled")
-    
-    def _update_history_buttons(self):
-        """Update history navigation button states."""
-        self.btn_history_prev.configure(
-            state="normal" if self.history.has_previous() else "disabled"
-        )
-        self.btn_history_next.configure(
-            state="normal" if self.history.has_next() else "disabled"
-        )
-    
-    def save_config(self):
-        """Save current configuration."""
-        self.app_config.update({
-            "base_url": self.base_url_var.get(),
-            "api_key": self.api_key_var.get(),
-            "last_pattern": self.pattern_var.get(),
-            "window_geometry": self.geometry()
-        })
-        ConfigManager.save(self.app_config)
-    
-    # -----------------------------
-    # Content Extraction Methods
-    # -----------------------------
-    
-    def extract_content_from_json(self, data: Any) -> str:
-        """Extract content from JSON response."""
-        if isinstance(data, dict):
-            if "content" in data and "type" in data:
-                return data["content"]
-            return json.dumps(data, indent=2)
-        elif isinstance(data, list):
-            parts = []
-            for item in data:
-                if isinstance(item, dict) and item.get("type") == "content":
-                    parts.append(item.get("content", ""))
-            if parts:
-                return "\n".join(parts)
-            return json.dumps(data, indent=2)
+        
+        if processing:
+            self._start_progress_animation()
         else:
-            return str(data)
-    
-    def parse_sse_response(self, response: requests.Response) -> str:
-        """Parse Server-Sent Events response."""
-        contents = []
-        
+            self._stop_progress_animation()
+
+    def _start_progress_animation(self) -> None:
+        """Start the animated processing indicator."""
+        self._progress_dot_count = 0
+        self._progress_color_index = 0
+        self._animate_progress()
+
+    def _stop_progress_animation(self) -> None:
+        """Stop the animated processing indicator."""
+        if self._progress_animation_id:
+            self.after_cancel(self._progress_animation_id)
+            self._progress_animation_id = None
+        # Reset status label color to default
         try:
-            for line in response.iter_lines(decode_unicode=True):
-                if self.cancel_request:
-                    logger.info("Request cancelled by user")
-                    return "[Request cancelled]"
-                
-                if not line:
-                    continue
-                
-                line = line.strip()
-                if not line.startswith("data:"):
-                    continue
-                
-                payload = line[len("data:"):].strip()
-                if payload == "[DONE]":
-                    break
-                
-                try:
-                    obj = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                
-                # Extract content from Fabric response format
-                if isinstance(obj, dict) and obj.get("type") == "content":
-                    contents.append(obj.get("content", ""))
-                elif isinstance(obj, list):
-                    for item in obj:
-                        if isinstance(item, dict) and item.get("type") == "content":
-                            contents.append(item.get("content", ""))
-            
-            return "\n".join(contents).strip()
-        
-        except Exception as e:
-            logger.error(f"Error parsing SSE: {e}")
-            raise
-    
-    def parse_sse_text(self, text: str) -> str:
-        """Parse SSE content from a raw string."""
-        contents = []
-        
-        try:
-            for line in text.splitlines():
-                if not line:
-                    continue
-                
-                line = line.strip()
-                if not line.startswith("data:"):
-                    continue
-                
-                payload = line[len("data:"):].strip()
-                if payload == "[DONE]":
-                    break
-                
-                try:
-                    obj = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                
-                # Extract content from Fabric response format
-                if isinstance(obj, dict) and obj.get("type") == "content":
-                    contents.append(obj.get("content", ""))
-                elif isinstance(obj, list):
-                    for item in obj:
-                        if isinstance(item, dict) and item.get("type") == "content":
-                            contents.append(item.get("content", ""))
-            
-            return "\n".join(contents).strip()
-        
-        except Exception as e:
-            logger.error(f"Error parsing SSE text: {e}")
-            return text
-            
-    def on_test_server(self):
-        """Test server connection."""
-        base_url = self.base_url_var.get().strip()
-        api_key = self.api_key_var.get().strip()
-        
-        if not base_url:
-            messagebox.showerror("Error", "Base URL is required")
+            self.status_label.configure(text_color=("gray10", "gray90"))
+        except Exception:
+            pass
+
+    def _animate_progress(self) -> None:
+        """Animate the processing status with pulsing dots and color."""
+        if not hasattr(self, 'status_label'):
             return
             
+        # Update dots: Processing. -> Processing.. -> Processing... -> Processing
+        self._progress_dot_count = (self._progress_dot_count + 1) % 4
+        dots = "." * self._progress_dot_count if self._progress_dot_count > 0 else ""
+        self.status_var.set(f"Processing{dots}")
+        
+        # Pulse color
+        self._progress_color_index = (self._progress_color_index + 1) % len(self._progress_colors)
+        color = self._progress_colors[self._progress_color_index]
         try:
-            # Update config if changed
-            if base_url != self.app_config["base_url"] or api_key != self.app_config["api_key"]:
-                self.app_config["base_url"] = base_url
-                self.app_config["api_key"] = api_key
-                self.server_manager.base_url = self.server_manager.normalize_base_url(base_url)
-                self.save_config()
-            
-            # Test connection
-            is_online = self.server_manager.check_health()
-            
-            if is_online:
-                messagebox.showinfo("Success", "Connected to Fabric server successfully!")
+            self.status_label.configure(text_color=color)
+        except Exception:
+            pass
+        
+        # Schedule next animation frame (300ms for smooth but not too fast)
+        self._progress_animation_id = self.after(300, self._animate_progress)
+
+    def _update_history_buttons(self) -> None:
+        self.btn_history_prev.configure(state="normal" if self.history.has_previous() else "disabled")
+        self.btn_history_next.configure(state="normal" if self.history.has_next() else "disabled")
+
+    # -----------------------------
+    # Server UI Actions
+    # -----------------------------
+
+    def on_test_server(self) -> None:
+        try:
+            self._sync_server_manager_from_ui()
+            self._save_config_from_ui()
+
+            ok = self.server_manager.check_health()
+            if ok:
+                messagebox.showinfo("Success", "Connected to Fabric server successfully.")
                 self._on_server_status_change(True)
             else:
-                messagebox.showerror("Error", "Could not connect to Fabric server.\nMake sure it is running and the URL is correct.")
+                messagebox.showerror("Error", "Could not connect to Fabric server.\nCheck Base URL and whether the server is running.")
                 self._on_server_status_change(False)
-                
         except Exception as e:
-            logger.error(f"Test connection failed: {e}")
-            messagebox.showerror("Error", f"Connection test failed: {str(e)}")
-            
-    def on_start_server(self):
-        """Start the Fabric server."""
+            messagebox.showerror("Error", str(e))
+
+    def on_start_server(self) -> None:
         try:
             self.btn_start_server.configure(state="disabled")
-            self.set_status("Starting server...")
-            
+            self._sync_server_manager_from_ui()
+            self._save_config_from_ui()
+
+            self._set_status("Starting server...")
             success = self.server_manager.start_server()
-            
-            if success:
-                self.set_status("Server started")
-                self._on_server_status_change(True)
-            else:
-                self.set_status("Failed to start server")
-                messagebox.showerror("Error", "Failed to start server. Check logs for details.")
+            if not success:
+                self._set_status("Failed to start server")
+
+                tail = "\n".join(self.server_manager.last_server_lines[-20:])
+                if tail.strip():
+                    messagebox.showerror("Fabric server failed to start", f"Fabric exited immediately.\n\nLast output:\n{tail}")
+                else:
+                    messagebox.showerror("Fabric server failed to start", "Fabric exited immediately.\n\nNo output captured. Check logs.")
                 self.btn_start_server.configure(state="normal")
-                
+                return
+
+            self.after(800, self.load_patterns)
+            self._set_status("Server started")
+            self.btn_stop_server.configure(state="normal")
+
         except Exception as e:
             logger.error(f"Start server error: {e}")
-            self.set_status("Error starting server")
-            messagebox.showerror("Error", f"An error occurred: {str(e)}")
+            self._set_status("Error starting server")
+            messagebox.showerror("Error", str(e))
             self.btn_start_server.configure(state="normal")
-            
-    def on_stop_server(self):
-        """Stop the Fabric server."""
-        if not messagebox.askyesno("Confirm", "Are you sure you want to stop the Fabric server?"):
+
+    def on_stop_server(self) -> None:
+        if not messagebox.askyesno("Confirm", "Stop the Fabric server?"):
             return
-            
-        try:
-            self.btn_stop_server.configure(state="disabled")
-            self.set_status("Stopping server...")
-            
-            success = self.server_manager.stop_server()
-            
-            if success:
-                self.set_status("Server stopped")
-                self._on_server_status_change(False)
-            else:
-                self.set_status("Failed to stop server")
-                messagebox.showerror("Error", "Failed to stop server. Check logs for details.")
-                self.btn_stop_server.configure(state="normal")
-                
-        except Exception as e:
-            logger.error(f"Stop server error: {e}")
-            self.set_status("Error stopping server")
-            messagebox.showerror("Error", f"An error occurred: {str(e)}")
+        self._set_status("Stopping server...")
+        ok = self.server_manager.stop_server()
+        if ok:
+            self._set_status("Server stopped")
+            self._on_server_status_change(False)
+        else:
+            self._set_status("Failed to stop server")
+            messagebox.showerror("Error", "Failed to stop server. Check logs.")
             self.btn_stop_server.configure(state="normal")
 
-    def _auto_start_server(self):
-        """Auto-start server if configured."""
-        logger.info("Auto-starting server...")
-        self.on_start_server()
-    
-    def _on_server_status_change(self, is_online: bool):
-        """Callback for server status changes."""
-        # Update LED in main thread
+    def _on_server_status_change(self, is_online: bool) -> None:
         self.after(0, lambda: self._update_led_status(is_online))
-    
-    def _update_led_status(self, is_online: bool):
-        """Update LED indicator based on server status."""
+
+    def _update_led_status(self, is_online: bool) -> None:
         if is_online:
             self.status_led.itemconfig(self.led_indicator, fill="green", outline="darkgreen")
-            self._update_tooltip_text(self.status_led, "Server: Online")
+            self._update_tooltip_text(self.status_led, f"Server: Online ({self.server_manager.base_url})")
             self.btn_start_server.configure(state="disabled")
             self.btn_stop_server.configure(state="normal")
-            # Auto-load patterns when server comes online, but only if not already loaded
-            current_values = self.pattern_combo.cget("values")
-            if not current_values or current_values == ["No patterns found"] or current_values == ["Error loading patterns"]:
-                self.load_patterns()
         else:
             self.status_led.itemconfig(self.led_indicator, fill="red", outline="darkred")
-            self._update_tooltip_text(self.status_led, "Server: Offline")
+            self._update_tooltip_text(self.status_led, f"Server: Offline ({self.server_manager.base_url})")
             self.btn_start_server.configure(state="normal")
             self.btn_stop_server.configure(state="disabled")
-    
-    def _update_tooltip_text(self, widget, text):
-        """Update tooltip text for a widget."""
-        # Store tooltip text as widget attribute
-        widget.tooltip_text = text
 
-    def load_patterns(self):
-        """Load available patterns from Fabric."""
+    # -----------------------------
+    # Patterns / Models
+    # -----------------------------
+
+    def _filter_patterns(self, *args) -> None:
+        if not self.all_patterns:
+            return
+        needle = (self.pattern_search_var.get() or "").strip().lower()
+        if not needle:
+            self.pattern_combo.configure(values=self.all_patterns)
+            return
+        filtered = [p for p in self.all_patterns if needle in p.lower()]
+        self.pattern_combo.configure(values=filtered if filtered else ["No matches found"])
+
+    def load_patterns(self) -> None:
         try:
+            self._sync_server_manager_from_ui()
             patterns = self.server_manager.get_patterns()
-            if patterns is not None:
-                if patterns:
-                    logger.info(f"Loaded {len(patterns)} patterns")
-                    self.pattern_combo.configure(values=patterns)
-                    if self.app_config["last_pattern"] in patterns:
-                        self.pattern_var.set(self.app_config["last_pattern"])
-                    elif patterns:
-                        self.pattern_var.set(patterns[0])
-                else:
-                    self.pattern_combo.configure(values=["No patterns found"])
-                    self.pattern_var.set("")
-            else:
+            if patterns is None:
+                self.all_patterns = []
                 self.pattern_combo.configure(values=["Server Offline / Error"])
-                self.pattern_var.set("")
+                return
+
+            if not patterns:
+                self.all_patterns = []
+                self.pattern_combo.configure(values=["No patterns found"])
+                return
+
+            self.all_patterns = patterns
+            self._filter_patterns()
+
+            last = self.app_config.get("last_pattern", "")
+            values = list(self.pattern_combo.cget("values") or [])
+            if last and last in values:
+                self.pattern_var.set(last)
+            elif values and values[0] not in ("No matches found", "No patterns found", "Server Offline / Error"):
+                if not self.pattern_var.get():
+                    self.pattern_var.set(values[0])
+
         except Exception as e:
             logger.error(f"Error loading patterns: {e}")
             self.pattern_combo.configure(values=["Error loading patterns"])
-            
-    def on_send(self, event=None):
-        """Handle send button click."""
-        input_text = self.input_text.get("1.0", "end-1c")
-        if not input_text.strip():
-            messagebox.showwarning("Warning", "Please enter some text to process.")
-            return
-            
-        # Check if server is running
-        if not self.server_manager.is_running():
-            if messagebox.askyesno("Server Offline", "The Fabric server appears to be offline. Start it now?"):
-                self.on_start_server()
-                # Wait a bit for server to start
-                self.after(2000, lambda: self.on_send(event))
-            return
 
-        self.set_ui_state(processing=True)
-        self.status_var.set("Processing...")
-        self.output_text.configure(state="normal")
-        self.output_text.delete("1.0", "end")
-        self.output_text.configure(state="disabled")
-        
-        # Save input to history
-        self.history.add(self.pattern_var.get(), input_text, "")
-        
-        # Start processing in a separate thread
-        self.cancel_request = False
-        self.current_request_thread = threading.Thread(target=self._process_request, args=(input_text,))
-        self.current_request_thread.daemon = True
-        self.current_request_thread.start()
-        
-    def on_cancel(self):
-        """Handle cancel button click."""
-        if self.current_request_thread and self.current_request_thread.is_alive():
-            self.cancel_request = True
-            self.status_var.set("Cancelling...")
-            self.btn_cancel.configure(state="disabled")
-            
-    def load_models(self):
-        """Load available models and populate dropdown."""
+    def load_models(self) -> None:
         try:
             models_by_provider = self.server_manager.get_models()
             if not models_by_provider:
                 self.model_combo.configure(values=["Error loading models"])
                 return
 
-            display_values = []
-            
-            # Sort providers
-            sorted_providers = sorted(models_by_provider.keys())
-            
-            for provider in sorted_providers:
-                # Add Provider as a header (no indentation)
-                display_values.append(provider)
-                
-                # Add models indented
-                for model in sorted(models_by_provider[provider]):
-                    display_values.append(f"  {model}")
-            
-            self.model_combo.configure(values=display_values)
-            
-            # Get default model
+            display: List[str] = []
+            for provider, models in models_by_provider.items():
+                display.append(provider)
+                for m in models:
+                    display.append(f"  {m}")
+
+            self.model_combo.configure(values=display)
+
             default_model = self.server_manager.get_default_model()
             if default_model:
                 self.default_model_label.configure(text=f"Default: {default_model}")
             else:
                 self.default_model_label.configure(text="Default: (System Default)")
-            
-            # Restore last selected model if valid
+
             last_model = self.app_config.get("last_model", "")
-            if last_model:
-                # Try to find it in the list (it might be indented)
-                if f"  {last_model}" in display_values:
-                    self.model_var.set(f"  {last_model}")
-                elif last_model in display_values: # Should not happen for models
-                    self.model_var.set(last_model)
-            
+            if last_model and f"  {last_model}" in display:
+                self.model_var.set(f"  {last_model}")
+                self.last_valid_model = f"  {last_model}"
+
         except Exception as e:
             logger.error(f"Error loading models: {e}")
             self.model_combo.configure(values=["Error loading models"])
 
-    def _on_model_selected(self, event):
-        """Handle model selection."""
-        selection = self.model_var.get()
-        if not selection.startswith("  "):
-            # User selected a provider header, reset selection or ignore
-            # Ideally we would disable selection of headers, but Combobox doesn't support that easily.
-            # We'll just clear it or select the first child?
-            # Let's just clear it for now to indicate invalid selection
-            self.model_var.set("")
+    def _on_model_selected(self, event) -> None:
+        sel = self.model_var.get()
+        if sel and not sel.startswith("  "):
+            self.model_var.set(self.last_valid_model)
             return
-            
+        self.last_valid_model = sel
         self._update_command_preview()
 
-    def _process_request(self, input_text):
-        """Process the request in a background thread."""
+    def reset_model_selection(self) -> None:
+        self.model_var.set("")
+        self.last_valid_model = ""
+        self._update_command_preview()
+        self._set_status("Model reset to default")
+
+    def _update_command_preview(self, *args) -> None:
+        cmd = self.app_config.get("fabric_command", "fabric")
+        pattern = self.pattern_var.get().strip()
+        if pattern:
+            cmd += f" -p {pattern}"
+        model_sel = self.model_var.get()
+        if model_sel and model_sel.startswith("  "):
+            cmd += f" -m {model_sel.strip()}"
+        self.command_var.set(cmd)
+
+    # -----------------------------
+    # Request Execution (Fabric CLI)
+    # -----------------------------
+
+    def on_send(self, event=None) -> None:
+        input_text = self.input_text.get("1.0", "end-1c")
+        if not input_text.strip():
+            messagebox.showwarning("Warning", "Please enter some text to process.")
+            return
+
         try:
-            pattern = self.pattern_var.get()
+            self._sync_server_manager_from_ui()
+            self._save_config_from_ui()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        if not self.server_manager.is_running():
+            if messagebox.askyesno("Server Offline", "Fabric server appears offline. Start it now?"):
+                self.on_start_server()
+                self.after(1500, lambda: self.on_send(event))
+            return
+
+        self._set_ui_processing(True)
+        self.status_var.set("Processing...")
+        self._set_output_text("")
+
+        self.history.add(self.pattern_var.get(), input_text, "")
+
+        self.cancel_request = False
+        self.current_request_thread = threading.Thread(target=self._process_request, args=(input_text,), daemon=True)
+        self.current_request_thread.start()
+
+    def on_cancel(self) -> None:
+        if self.current_request_thread and self.current_request_thread.is_alive():
+            self.cancel_request = True
+            self.status_var.set("Cancelling...")
+            self.btn_cancel.configure(state="disabled")
+            try:
+                if self.current_process and self.current_process.poll() is None:
+                    self.current_process.terminate()
+            except Exception:
+                pass
+
+    def _should_filter_line(self, line: str) -> bool:
+        if "Ollama Get" in line and "connectex" in line:
+            return True
+        return False
+
+    def _process_request(self, input_text: str) -> None:
+        try:
+            pattern = self.pattern_var.get().strip()
             if not pattern:
                 self.after(0, lambda: messagebox.showwarning("Warning", "Please select a pattern."))
-                self.after(0, lambda: self.set_ui_state(processing=False))
+                self.after(0, lambda: self._set_ui_processing(False))
                 return
 
-            # Save last used pattern
             self.app_config["last_pattern"] = pattern
-            
-            # Save last used model
             model_selection = self.model_var.get()
             if model_selection and model_selection.startswith("  "):
                 self.app_config["last_model"] = model_selection.strip()
-            
-            self.save_config()
-            
-            # Use subprocess to call fabric CLI directly
+            else:
+                self.app_config["last_model"] = ""
+
+            self._save_config_from_ui()
+
             fabric_cmd = self.app_config.get("fabric_command", "fabric")
             cmd = [fabric_cmd, "-p", pattern]
-            
-            # Add model flag if selected
             if model_selection and model_selection.startswith("  "):
-                model_name = model_selection.strip()
-                cmd.extend(["-m", model_name])
-            
-            # Prepare environment with unbuffered output
+                cmd.extend(["-m", model_selection.strip()])
+
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
-            
-            # Start process with unbuffered binary I/O
+
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = subprocess.CREATE_NO_WINDOW
+
             process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, # Redirect stderr to stdout to prevent deadlock
-                text=False, # Binary mode for unbuffered I/O
-                bufsize=0,  # Unbuffered
-                env=env
+                stderr=subprocess.STDOUT,
+                text=False,
+                bufsize=0,
+                env=env,
+                creationflags=creationflags,
             )
-            
             self.current_process = process
-            
-            # Helper function to write input in a separate thread
-            def _write_input(proc, text):
-                try:
-                    if text:
-                        # Encode to UTF-8
-                        proc.stdin.write(text.encode('utf-8'))
-                        proc.stdin.flush()
-                    proc.stdin.close()
-                except Exception as e:
-                    logger.error(f"Error writing to stdin: {e}")
 
-            # Start writer thread
-            self.after(0, lambda: self.status_var.set("Sending input..."))
-            writer_thread = threading.Thread(target=_write_input, args=(process, input_text))
-            writer_thread.daemon = True
-            writer_thread.start()
-            
+            def _write_input():
+                try:
+                    if process.stdin:
+                        process.stdin.write(input_text.encode("utf-8"))
+                        process.stdin.flush()
+                        process.stdin.close()
+                except Exception as e:
+                    logger.error(f"Error writing stdin: {e}")
+
+            threading.Thread(target=_write_input, daemon=True).start()
+
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
             full_output = ""
-            
-            # Use incremental decoder for correct UTF-8 handling across chunks
-            import codecs
-            decoder = codecs.getincrementaldecoder("utf-8")(errors='replace')
-            
-            # Buffer for filtering startup errors (like Ollama connection issues)
-            startup_buffer = ""
-            filtering_phase = True
-            
-            # Read stdout in chunks to ensure real-time updates without freezing UI
+            line_buffer = ""
+
             while True:
                 if self.cancel_request:
-                    process.terminate()
                     break
-                
-                # Read a chunk of bytes (unbuffered)
-                chunk = process.stdout.read(4096)
-                
+
+                chunk = b""
+                try:
+                    if process.stdout:
+                        chunk = process.stdout.read(CHUNK_SIZE)
+                except Exception:
+                    chunk = b""
+
                 if not chunk and process.poll() is not None:
                     break
-                
+
                 if chunk:
                     text = decoder.decode(chunk, final=False)
                     if not text:
                         continue
-                        
-                    if filtering_phase:
-                        startup_buffer += text
-                        
-                        # If we have a newline or buffer is getting large, process it
-                        if "\n" in startup_buffer or len(startup_buffer) > 1000:
-                            # Split into lines to filter
-                            lines = startup_buffer.splitlines(keepends=True)
-                            
-                            # If the last line is incomplete and buffer isn't too huge, keep it
-                            pending = ""
-                            if not startup_buffer.endswith("\n") and len(startup_buffer) <= 1000:
-                                pending = lines.pop()
-                            
-                            filtered_text = ""
-                            for line in lines:
-                                # Filter out Ollama connection errors
-                                if "Ollama Get" in line and "connectex" in line:
-                                    continue
-                                filtered_text += line
-                            
-                            if filtered_text:
-                                self.after(0, self._append_output_text, filtered_text)
-                            
-                            # If we processed lines, we can probably stop filtering, 
-                            # unless the error spans multiple lines (unlikely for this specific error)
-                            # But to be safe, we'll stop filtering after the first batch of lines
-                            # or if we have printed something real.
-                            if filtered_text.strip():
-                                filtering_phase = False
-                                # Output pending immediately if we stop filtering
-                                if pending:
-                                    self.after(0, self._append_output_text, pending)
-                                    pending = ""
-                            
-                            startup_buffer = pending
-                            
-                            # If buffer is still growing (no newlines found yet but > 1000 chars),
-                            # just dump it to avoid holding back content
-                            if len(startup_buffer) > 1000:
-                                self.after(0, self._append_output_text, startup_buffer)
-                                startup_buffer = ""
-                                filtering_phase = False
-                    else:
-                        # Passthrough mode
-                        self.after(0, self._append_output_text, text)
-            
-            # Flush any remaining bytes
+
+                    line_buffer += text
+                    while "\n" in line_buffer:
+                        line, line_buffer = line_buffer.split("\n", 1)
+                        line = line + "\n"
+                        if self._should_filter_line(line):
+                            continue
+                        full_output += line
+                        self.after(0, self._append_output_text, line)
+
             remaining = decoder.decode(b"", final=True)
             if remaining:
-                if filtering_phase and startup_buffer:
-                     # Process remaining buffer
-                     remaining = startup_buffer + remaining
-                self.after(0, self._append_output_text, remaining)
-            
-            # Wait for writer thread to finish
-            writer_thread.join(timeout=1)
-            
+                line_buffer += remaining
+
+            if line_buffer and not self._should_filter_line(line_buffer):
+                full_output += line_buffer
+                self.after(0, self._append_output_text, line_buffer)
+
             if self.cancel_request:
                 self.after(0, lambda: self.status_var.set("Cancelled"))
-            elif process.returncode != 0:
-                # Stderr is already in stdout, so we just check return code
-                self.after(0, lambda: self.status_var.set("Completed (with error code)"))
-                self.history.update_current_output(full_output)
             else:
-                self.after(0, lambda: self.status_var.set("Completed"))
-                self.history.update_current_output(full_output)
-                
+                rc = process.poll()
+                if rc and rc != 0:
+                    self.after(0, lambda: self.status_var.set(f"Completed (error code {rc})"))
+                else:
+                    self.after(0, lambda: self.status_var.set("Completed"))
+
+            self.history.update_current_output(full_output)
+
         except Exception as e:
             logger.error(f"Processing error: {e}")
-            error_msg = str(e)
-            self.after(0, lambda: messagebox.showerror("Error", f"An error occurred: {error_msg}"))
+            self.after(0, lambda: messagebox.showerror("Error", str(e)))
             self.after(0, lambda: self.status_var.set("Error"))
         finally:
-            self.after(0, lambda: self.set_ui_state(processing=False))
-            self.current_request_thread = None
+            try:
+                if self.current_process and self.current_process.poll() is None:
+                    self.current_process.terminate()
+                    try:
+                        self.current_process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        self.current_process.kill()
+                        self.current_process.wait(timeout=2)
+            except Exception:
+                pass
+
+            try:
+                if self.current_process and self.current_process.stdout:
+                    self.current_process.stdout.close()
+            except Exception:
+                pass
+            try:
+                if self.current_process and self.current_process.stdin:
+                    self.current_process.stdin.close()
+            except Exception:
+                pass
+
             self.current_process = None
-            
-    def _append_output_text(self, text):
-        """Append text to the output text widget."""
-        self.output_text.configure(state="normal")
-        self.output_text.insert("end", text)
-        self.output_text.see("end")
-        self.output_text.configure(state="disabled")
-        
-    def save_output(self):
-        """Save output to a file."""
+            self.after(0, lambda: self._set_ui_processing(False))
+
+    # -----------------------------
+    # Output/Input Utilities
+    # -----------------------------
+
+    def save_output(self) -> None:
         text = self.output_text.get("1.0", "end-1c")
         if not text.strip():
             messagebox.showinfo("Info", "No output to save.")
             return
-            
+
         file_path = filedialog.asksaveasfilename(
             defaultextension=".md",
-            filetypes=[("Markdown files", "*.md"), ("Text files", "*.txt"), ("All files", "*.*")]
+            filetypes=[("Markdown files", "*.md"), ("Text files", "*.txt"), ("All files", "*.*")],
         )
-        
-        if file_path:
-            try:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(text)
-                self.status_var.set(f"Saved to {os.path.basename(file_path)}")
-            except Exception as e:
-                logger.error(f"Error saving file: {e}")
-                messagebox.showerror("Error", f"Could not save file: {e}")
-                
-    def copy_output(self):
-        """Copy output to clipboard."""
+        if not file_path:
+            return
+
+        try:
+            Path(file_path).write_text(text, encoding="utf-8")
+            self.status_var.set(f"Saved to {Path(file_path).name}")
+        except Exception as e:
+            logger.error(f"Error saving file: {e}")
+            messagebox.showerror("Error", str(e))
+
+    def copy_output(self) -> None:
         text = self.output_text.get("1.0", "end-1c")
-        if text:
-            self.clipboard_clear()
-            self.clipboard_append(text)
-            self.status_var.set("Copied to clipboard")
-            
-    def clear_output(self):
-        """Clear output text."""
-        self.output_text.configure(state="normal")
-        self.output_text.delete("1.0", "end")
-        self.output_text.configure(state="disabled")
+        if not text:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.status_var.set("Copied to clipboard")
+
+    def clear_output(self) -> None:
+        self._set_output_text("")
         self.status_var.set("Output cleared")
-        
-    def paste_input(self):
-        """Paste from clipboard to input."""
+
+    def paste_input(self) -> None:
         try:
             text = self.clipboard_get()
             self.input_text.insert("end", text)
-        except:
+        except Exception:
             pass
-            
-    def clear_input(self):
-        """Clear input text."""
+
+    def clear_input(self) -> None:
         self.input_text.delete("1.0", "end")
-        
-    def history_previous(self):
-        """Navigate to previous history item."""
-        entry = self.history.previous()
-        if entry:
-            self.input_text.delete("1.0", "end")
-            self.input_text.insert("1.0", entry["input"])
-            self.set_output_text(entry["output"])
-            # Also restore the pattern used
-            if entry["pattern"] and entry["pattern"] in self.pattern_combo.cget("values"):
-                self.pattern_var.set(entry["pattern"])
-            self._update_history_buttons()
-            
-    def history_next(self):
-        """Navigate to next history item."""
-        entry = self.history.next()
-        if entry:
-            self.input_text.delete("1.0", "end")
-            self.input_text.insert("1.0", entry["input"])
-            self.set_output_text(entry["output"])
-            # Also restore the pattern used
-            if entry["pattern"] and entry["pattern"] in self.pattern_combo.cget("values"):
-                self.pattern_var.set(entry["pattern"])
-            self._update_history_buttons()
-            
-    def _update_history_buttons(self):
-        """Update history navigation button states."""
-        self.btn_history_prev.configure(
-            state="normal" if self.history.has_previous() else "disabled"
+
+    def import_file(self) -> None:
+        """Import text from a .txt or .md file into the input box."""
+        file_path = filedialog.askopenfilename(
+            title="Import Text File",
+            filetypes=[
+                ("Text files", "*.txt"),
+                ("Markdown files", "*.md"),
+                ("All supported", "*.txt;*.md"),
+            ],
+            defaultextension=".txt",
         )
-        self.btn_history_next.configure(
-            state="normal" if self.history.has_next() else "disabled"
-        )
+        if not file_path:
+            return
         
-    def set_output_text(self, text: str):
-        """Set output text widget content."""
-        self.output_text.configure(state="normal")
-        self.output_text.delete("1.0", "end")
-        self.output_text.insert("1.0", text)
-        self.output_text.configure(state="disabled")
-        
-    def set_ui_state(self, processing: bool):
-        """Enable/disable UI elements during processing."""
-        state = "disabled" if processing else "normal"
-        self.btn_send.configure(state=state)
-        self.btn_cancel.configure(state="normal" if processing else "disabled")
-        
-    def get_headers(self) -> Dict[str, str]:
-        """Get HTTP headers for requests."""
-        headers = {"Content-Type": "application/json"}
-        if self.app_config["api_key"]:
-            headers["Authorization"] = f"Bearer {self.app_config['api_key']}"
-        return headers
-        
-    def view_logs(self):
-        """Open log file."""
-        log_file = "fabric_gui.log"
-        if os.path.exists(log_file):
-            os.startfile(log_file)
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            
+            # Clear existing content and insert new
+            self.input_text.delete("1.0", "end")
+            self.input_text.insert("1.0", content)
+            
+            # Show filename in status
+            filename = Path(file_path).name
+            self._set_status(f"Imported: {filename}")
+            logger.info(f"Imported file: {file_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to import file: {e}")
+            messagebox.showerror("Import Error", f"Failed to import file:\n{e}")
+
+    # -----------------------------
+    # History Navigation
+    # -----------------------------
+
+    def _load_history_entry(self, entry: Optional[Dict[str, str]]) -> None:
+        """Load a history entry into the UI."""
+        if not entry:
+            return
+        self.input_text.delete("1.0", "end")
+        self.input_text.insert("1.0", entry.get("input", ""))
+        self._set_output_text(entry.get("output", ""))
+        pat = entry.get("pattern", "")
+        if pat and pat in (self.pattern_combo.cget("values") or []):
+            self.pattern_var.set(pat)
+        self._update_history_buttons()
+
+    def history_previous(self) -> None:
+        self._load_history_entry(self.history.previous())
+
+    def history_next(self) -> None:
+        self._load_history_entry(self.history.next())
+
+    # -----------------------------
+    # Help / About
+    # -----------------------------
+
+    def view_logs(self) -> None:
+        if LOG_FILE.exists():
+            try:
+                os.startfile(str(LOG_FILE))
+            except Exception:
+                messagebox.showinfo("Logs", str(LOG_FILE))
         else:
             messagebox.showinfo("Info", "No log file found.")
-            
-    def show_about(self):
-        """Show about dialog."""
-        messagebox.showinfo("About", "Fabric Mini GUI\n\nA simple GUI for the Fabric AI framework.")
+
+    def show_about(self) -> None:
+        messagebox.showinfo("About", "Fabric GUI v3.2\n\nA desktop client for the Fabric AI framework.\n\nBuilt with Python and CustomTkinter.")
+
+    def show_help(self) -> None:
+        """Display the comprehensive help dialog."""
+        help_window = ctk.CTkToplevel(self)
+        help_window.title("Fabric GUI - User Guide")
+        help_window.geometry("700x600")
+        help_window.transient(self)
+        help_window.grab_set()
         
-    def save_config(self):
-        """Save current configuration."""
-        ConfigManager.save(self.app_config)
+        # Center the window
+        help_window.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() // 2) - 350
+        y = self.winfo_y() + (self.winfo_height() // 2) - 300
+        help_window.geometry(f"+{x}+{y}")
         
-    def on_closing(self):
-        """Handle application closing."""
-        # Only prompt if the GUI started the server (not an external one)
-        if self.server_manager.process is not None and self.server_manager.is_running():
-            if messagebox.askyesno("Stop Server", "Stop Fabric server before exiting?"):
+        # Create scrollable text area
+        help_text = ctk.CTkTextbox(
+            help_window,
+            wrap="word",
+            font=("Consolas", 12),
+            fg_color=("gray95", "gray10"),
+        )
+        help_text.pack(fill="both", expand=True, padx=10, pady=10)
+        help_text.insert("1.0", HELP_TEXT)
+        help_text.configure(state="disabled")
+        
+        # Close button
+        close_btn = ctk.CTkButton(
+            help_window,
+            text="Close",
+            command=help_window.destroy,
+            width=100,
+        )
+        close_btn.pack(pady=(0, 10))
+
+    # -----------------------------
+    # Closing
+    # -----------------------------
+
+    def on_closing(self) -> None:
+        try:
+            self._save_config_from_ui()
+        except Exception:
+            pass
+
+        try:
+            if self.app_config.get("stop_server_on_exit", True):
                 self.server_manager.stop_server()
-        
-        self.save_config()
+        except Exception:
+            pass
+
+        try:
+            self.server_manager.stop_health_monitoring()
+        except Exception:
+            pass
+
         logger.info("Fabric GUI closed")
         self.destroy()
+
 
 if __name__ == "__main__":
     app = FabricGUI()

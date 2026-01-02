@@ -56,7 +56,7 @@ A modern desktop client for interacting with [Fabric](https://github.com/danielm
 ## Installation
 
 ### Requirements
-- Python 3.7+
+- Python 3.11+
 - `requests` library
 - `customtkinter` library
 
@@ -286,6 +286,8 @@ Suggestions and improvements are welcome! Please ensure:
 - Documentation is updated
 
 ## Credits
+
+**Fabric GUI** designed and developed by [DigitalGods.ai](https://digitalgods.ai)
 
 Built for the [Fabric](https://github.com/danielmiessler/fabric) AI framework by Daniel Miessler.
 
