@@ -753,6 +753,7 @@ class FabricGUI(ctk.CTk):
         self.option_add("*TCombobox*Listbox.foreground", "white")
         self.option_add("*TCombobox*Listbox.selectBackground", "#1f538d")
         self.option_add("*TCombobox*Listbox.selectForeground", "white")
+        self.option_add("*TCombobox*Listbox.font", ("Segoe UI", 14))
 
         self.server_manager = ServerManager(
             fabric_command=self.app_config["fabric_command"],
@@ -889,17 +890,17 @@ class FabricGUI(ctk.CTk):
         search_frame = ctk.CTkFrame(frame, fg_color="transparent")
         search_frame.grid(row=1, column=0, columnspan=6, sticky="ew", padx=5, pady=(6, 0))
 
-        ctk.CTkLabel(search_frame, text="Search:").pack(side="left", padx=5)
-        search_entry = ctk.CTkEntry(search_frame, textvariable=self.pattern_search_var, placeholder_text="Filter patterns...")
+        ctk.CTkLabel(search_frame, text="Search:", width=60, anchor="e").pack(side="left", padx=5)
+        search_entry = ctk.CTkEntry(search_frame, textvariable=self.pattern_search_var, placeholder_text="Filter patterns...", height=36, font=("Segoe UI", 14))
         search_entry.pack(side="left", padx=5, fill="x", expand=True)
 
         row2 = ctk.CTkFrame(frame, fg_color="transparent")
         row2.grid(row=2, column=0, columnspan=6, sticky="ew", padx=5, pady=6)
 
-        ctk.CTkLabel(row2, text="Pattern:").pack(side="left", padx=5)
+        ctk.CTkLabel(row2, text="Pattern:", width=60, anchor="e").pack(side="left", padx=5)
 
-        self.pattern_combo = ttk.Combobox(row2, textvariable=self.pattern_var, width=45, state="readonly", height=20)
-        self.pattern_combo.pack(side="left", padx=5, fill="x", expand=True)
+        self.pattern_combo = ttk.Combobox(row2, textvariable=self.pattern_var, width=45, state="readonly", height=20, font=("Segoe UI", 14))
+        self.pattern_combo.pack(side="left", padx=5, fill="x", expand=True, ipady=6)
 
         btn_refresh = ctk.CTkButton(row2, text="Refresh Patterns", command=self.load_patterns)
         btn_refresh.pack(side="left", padx=5)
@@ -907,10 +908,10 @@ class FabricGUI(ctk.CTk):
         model_row = ctk.CTkFrame(frame, fg_color="transparent")
         model_row.grid(row=3, column=0, columnspan=6, sticky="ew", padx=5, pady=(0, 8))
 
-        ctk.CTkLabel(model_row, text="Model:").pack(side="left", padx=5)
+        ctk.CTkLabel(model_row, text="Model:", width=60, anchor="e").pack(side="left", padx=5)
 
-        self.model_combo = ttk.Combobox(model_row, textvariable=self.model_var, width=45, state="readonly", height=20)
-        self.model_combo.pack(side="left", padx=5, fill="x", expand=True)
+        self.model_combo = ttk.Combobox(model_row, textvariable=self.model_var, width=45, state="readonly", height=20, font=("Segoe UI", 14))
+        self.model_combo.pack(side="left", padx=5, fill="x", expand=True, ipady=6)
         self.model_combo.bind("<<ComboboxSelected>>", self._on_model_selected)
 
         self.default_model_label = ctk.CTkLabel(model_row, text="Default: (loading...)", text_color="gray", cursor="hand2")
@@ -934,7 +935,7 @@ class FabricGUI(ctk.CTk):
         mid.pack(side="left", fill="x", expand=True, padx=5, pady=6)
 
         ctk.CTkLabel(mid, text="Command Preview", font=FONT_HEADING).pack(anchor="w")
-        cmd_entry = ctk.CTkEntry(mid, textvariable=self.command_var, state="readonly", font=FONT_CODE)
+        cmd_entry = ctk.CTkEntry(mid, textvariable=self.command_var, state="readonly", font=FONT_CODE, height=36)
         cmd_entry.pack(fill="x", pady=(2, 0))
 
         right = ctk.CTkFrame(frame, fg_color="transparent")
