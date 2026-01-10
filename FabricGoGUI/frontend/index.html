@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <title>Fabric GUI</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./src/style.css" />
+</head>
+
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <div class="logo">
+                    <span class="logo-icon">◈</span>
+                    <span class="logo-text">Fabric GUI</span>
+                </div>
+                <span class="version-badge">Go Edition</span>
+            </div>
+            <div class="header-right">
+                <button class="server-status" id="serverStatus" title="Click to start/stop server">
+                    <span class="status-led offline" id="statusLed"></span>
+                    <span class="status-text" id="statusText">Offline</span>
+                </button>
+                <!-- History Navigation -->
+                <div class="history-nav">
+                    <button class="btn btn-ghost btn-icon-only" id="historyPrevBtn" title="Previous (Alt+←)" disabled>
+                        <span>◀</span>
+                    </button>
+                    <span class="history-count" id="historyCount">0/0</span>
+                    <button class="btn btn-ghost btn-icon-only" id="historyNextBtn" title="Next (Alt+→)" disabled>
+                        <span>▶</span>
+                    </button>
+                </div>
+                <button class="theme-toggle" id="themeToggle" title="Toggle Light/Dark Mode">
+                    <span class="icon-sun">☀️</span>
+                    <span class="icon-moon">🌙</span>
+                </button>
+                <button class="btn btn-ghost" id="settingsBtn" title="Settings">
+                    <span class="btn-icon">⚙</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Left Panel: Configuration -->
+            <section class="config-panel">
+                <div class="panel-section">
+                    <label class="label">Pattern</label>
+                    <div class="search-wrapper">
+                        <input type="text" id="patternSearch" class="input search-input"
+                            placeholder="Search patterns..." />
+                        <span class="search-icon">🔍</span>
+                    </div>
+                    <select id="patternSelect" class="select" size="8">
+                        <option disabled>Loading patterns...</option>
+                    </select>
+                </div>
+
+                <div class="panel-section">
+                    <label class="label">Model</label>
+                    <select id="modelSelect" class="select">
+                        <option disabled>Loading models...</option>
+                    </select>
+                </div>
+
+                <div class="panel-section command-preview">
+                    <label class="label">Command Preview</label>
+                    <code id="commandPreview" class="code-block">fabric --pattern [pattern] --model [model]</code>
+                </div>
+            </section>
+
+            <!-- Right Panel: I/O -->
+            <section class="io-panel">
+                <!-- Input -->
+                <div class="io-section input-section">
+                    <div class="section-header">
+                        <label class="label">Input</label>
+                        <div class="section-actions">
+                            <button class="btn btn-small btn-ghost" id="importBtn" title="Import file (Ctrl+O)">📁
+                                Import</button>
+                            <button class="btn btn-small btn-ghost" id="clearInputBtn">Clear</button>
+                            <button class="btn btn-small btn-ghost" id="pasteBtn">Paste</button>
+                        </div>
+                    </div>
+                    <textarea id="inputText" class="textarea" placeholder="Enter your text here..."></textarea>
+                </div>
+
+                <!-- Action Bar -->
+                <div class="action-bar">
+                    <button class="btn btn-primary btn-large" id="sendBtn">
+                        <span class="btn-icon">▶</span>
+                        <span>Send</span>
+                    </button>
+                    <button class="btn btn-secondary btn-large hidden" id="cancelBtn">
+                        <span class="btn-icon">■</span>
+                        <span>Cancel</span>
+                    </button>
+                </div>
+
+                <!-- Output -->
+                <div class="io-section output-section">
+                    <div class="section-header">
+                        <label class="label">Output</label>
+                        <div class="section-actions">
+                            <button class="btn btn-small btn-ghost" id="saveBtn" title="Save (Ctrl+S)">💾 Save</button>
+                            <button class="btn btn-small btn-ghost" id="copyBtn" title="Copy (Ctrl+C)">Copy</button>
+                            <button class="btn btn-small btn-ghost" id="clearOutputBtn">Clear</button>
+                        </div>
+                    </div>
+                    <div id="outputText" class="output-display"></div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Toast Container -->
+        <div class="toast-container" id="toastContainer"></div>
+
+        <!-- Settings Modal -->
+        <div class="modal hidden" id="settingsModal">
+            <div class="modal-backdrop"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Settings</h2>
+                    <button class="btn btn-ghost modal-close" id="closeSettingsBtn">✕</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label class="label">Fabric Server URL</label>
+                        <input type="text" id="baseUrlInput" class="input" value="http://localhost:8080" />
+                    </div>
+                    <div class="form-group">
+                        <button class="btn btn-secondary" id="testConnectionBtn">Test Connection</button>
+                        <span id="connectionResult" class="connection-result"></span>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-ghost" id="cancelSettingsBtn">Cancel</button>
+                    <button class="btn btn-primary" id="saveSettingsBtn">Save</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading Overlay -->
+        <div class="loading-overlay hidden" id="loadingOverlay">
+            <div class="loading-spinner"></div>
+            <span class="loading-text" id="loadingText">Processing...</span>
+        </div>
+    </div>
+
+    <script src="./src/main.js" type="module"></script>
+</body>
+
+</html>
