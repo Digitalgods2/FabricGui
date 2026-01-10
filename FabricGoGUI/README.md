@@ -124,6 +124,42 @@ This app works on most distributions (Ubuntu 20.04+, Fedora, Arch).
    ./build/bin/FabricGoGUI
    ```
 
+## 🚀 How to Run & Create Shortcuts
+
+### **Windows**
+
+1. Navigate to the `build/bin` folder.
+2. Right-click `FabricGoGUI.exe` -> **Send to** -> **Desktop (create shortcut)**.
+3. You can also **Pin to Start** or **Pin to Taskbar** for easy access.
+4. The app uses the native Windows icon automatically.
+
+### **macOS**
+
+1. The build creates `FabricGoGUI.app` in `build/bin`.
+2. Drag this app into your **Applications** folder.
+3. You can then launch it from **Spotlight** (Cmd+Space) or **Launchpad**.
+4. Drag it to your **Dock** for one-click access.
+
+### **Linux**
+
+for a system-wide launcher, create a `.desktop` entry:
+
+```bash
+# Create a desktop entry
+cat <<EOF > ~/.local/share/applications/fabric-gui.desktop
+[Desktop Entry]
+Type=Application
+Name=Fabric GUI
+Comment=Fabric AI Client
+Exec=/path/to/FabricGui/FabricGoGUI/build/bin/FabricGoGUI
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;AI;
+EOF
+```
+
+*(Replace `/path/to/...` with your actual path)*
+
 ## ⌨️ Keyboard Shortcuts
 
 | Shortcut | Action |
