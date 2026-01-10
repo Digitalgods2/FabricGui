@@ -463,9 +463,11 @@ func (a *App) SendChat(pattern, vendor, model, input string) error {
 						case "complete":
 							// Some servers/models might send the final chunk in the complete event
 							if event.Content != "" {
+								runtime.EventsEmit(a.ctx, "debug:log", fmt.Sprintf("Complete event had content: %q", event.Content))
 								runtime.EventsEmit(a.ctx, "chat:chunk", event.Content)
 								fullOutput += event.Content
 							}
+							runtime.EventsEmit(a.ctx, "debug:log", "Backend received complete event")
 							runtime.EventsEmit(a.ctx, "chat:complete", "")
 							a.AddHistoryEntry(pattern, model, input, fullOutput)
 							return nil
@@ -479,6 +481,7 @@ func (a *App) SendChat(pattern, vendor, model, input string) error {
 	}
 
 	if err := scanner.Err(); err != nil {
+		runtime.EventsEmit(a.ctx, "debug:log", fmt.Sprintf("Stream scanner error: %v", err))
 		return fmt.Errorf("error reading stream: %v", err)
 	}
 

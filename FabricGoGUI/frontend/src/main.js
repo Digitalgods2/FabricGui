@@ -551,6 +551,10 @@ function setupWailsEvents() {
     if (eventsInitialized) return;
     eventsInitialized = true;
 
+    EventsOn('debug:log', (msg) => {
+        console.log('[BACKEND]', msg);
+    });
+
     EventsOn('chat:chunk', (content) => {
         state.currentOutput += content;
         elements.outputText.textContent = state.currentOutput;
@@ -564,6 +568,10 @@ function setupWailsEvents() {
     });
 
     EventsOn('chat:complete', async () => {
+        console.log('[FRONTEND] Received chat:complete');
+        // Small delay to ensure all chunks are rendered
+        await new Promise(r => setTimeout(r, 200));
+
         setProcessingState(false);
 
         // Add to history
