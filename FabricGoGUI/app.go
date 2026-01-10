@@ -451,6 +451,8 @@ func (a *App) SendChat(pattern, vendor, model, input string) error {
 
 				if line != "" {
 					var event StreamEvent
+					if err := json.Unmarshal([]byte(line), &event); err == nil {
+						switch event.Type {
 						case "content":
 							runtime.EventsEmit(a.ctx, "chat:chunk", event.Content)
 							fullOutput += event.Content
