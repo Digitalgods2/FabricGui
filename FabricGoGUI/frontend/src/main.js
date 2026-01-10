@@ -389,10 +389,20 @@ function restoreModelSelection() {
 // ============================================
 // Command Preview
 // ============================================
+// ============================================
+// Command Preview
+// ============================================
 function updateCommandPreview() {
     const pattern = state.selectedPattern || '[pattern]';
     const model = state.selectedModel || '[model]';
-    elements.commandPreview.textContent = `fabric --pattern ${pattern} --model ${model}`;
+
+    // Simulate input piping for display
+    let inputPreview = '';
+    if (elements.inputText && elements.inputText.value) {
+        inputPreview = 'echo "..." | ';
+    }
+
+    elements.commandPreview.textContent = `${inputPreview}fabric --pattern ${pattern} --model ${model}`;
 }
 
 // ============================================
@@ -505,7 +515,7 @@ async function sendRequest() {
     }
 
     // Set processing state
-    const command = `fabric --pattern ${state.selectedPattern} --model ${state.selectedModel}`;
+    const command = `echo "..." | fabric --pattern ${state.selectedPattern} --model ${state.selectedModel}`;
     elements.loadingText.textContent = command;
     setProcessingState(true);
     elements.outputText.textContent = '';
@@ -681,6 +691,22 @@ function setupEventListeners() {
         const text = await navigator.clipboard.readText();
         elements.inputText.value = text;
         showToast('Text pasted', 'success');
+        updateCommandPreview();
+    });
+
+    // Copy Command button
+    const copyCommandBtn = document.getElementById('copyCommandBtn');
+    if (copyCommandBtn) {
+        copyCommandBtn.addEventListener('click', async () => {
+            const command = elements.commandPreview.textContent;
+            await navigator.clipboard.writeText(command);
+            showToast('Command copied to clipboard', 'success');
+        });
+    }
+
+    // Input text change
+    elements.inputText.addEventListener('input', () => {
+        updateCommandPreview();
     });
 
     // Import button
