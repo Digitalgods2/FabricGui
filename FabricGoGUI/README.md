@@ -57,16 +57,49 @@ wails build
 
 The binary will be located in `build/bin/FabricGoGUI.exe`.
 
+## 💻 macOS Support
+
+This app works natively on macOS (Intel & Apple Silicon).
+
+### Steps for iMac / MacBook
+
+1. **Install Prerequisites**:
+
+   ```bash
+   # Install Go
+   brew install go
+
+   # Install Wails
+   go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+   # Install Fabric (if not already installed)
+   go install github.com/danielmiessler/fabric@latest
+   ```
+
+2. **Clone & Build**:
+
+   ```bash
+   git clone https://github.com/Digitalgods2/FabricGui.git
+   cd FabricGui/FabricGoGUI
+   wails build
+   ```
+
+3. **Run**:
+   - The app bundle `FabricGoGUI.app` will be creating in `build/bin/`.
+   - Drag it to your **Applications** folder or run it directly.
+
+> **Note**: On first run, you might need to allow the app in **System Settings > Privacy & Security** since it's locally built and unsigned.
+
 ## ⌨️ Keyboard Shortcuts
 
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl + Enter` | Send Request |
-| `Ctrl + S` | Save Output to File |
-| `Ctrl + O` | Import File to Input |
-| `Alt + ←` | Previous History Item |
-| `Alt + →` | Next History Item |
-| `Esc` | Close Modals |
+| Shortcut       | Action                |
+| :---           | :---                  |
+| `Ctrl + Enter` | Send Request          |
+| `Ctrl + S`     | Save Output to File   |
+| `Ctrl + O`     | Import File to Input  |
+| `Alt + ←`      | Previous History Item |
+| `Alt + →`      | Next History Item     |
+| `Esc`          | Close Modals          |
 
 ## 🛠️ Architecture
 
