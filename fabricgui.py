@@ -715,6 +715,190 @@ class ContextMenu:
 
 
 # -----------------------------
+# Preferences Dialog
+# -----------------------------
+
+class PreferencesDialog(ctk.CTkToplevel):
+    """Cross-platform Preferences dialog with tabbed interface."""
+
+    def __init__(self, parent, config: Dict[str, Any]):
+        super().__init__(parent)
+        self.parent = parent
+        self.config = config.copy()
+        self.result: Optional[Dict[str, Any]] = None
+
+        self.title("Preferences")
+        self.geometry("500x420")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        # Center the dialog
+        self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() // 2) - 250
+        y = parent.winfo_y() + (parent.winfo_height() // 2) - 210
+        self.geometry(f"+{x}+{y}")
+
+        # Variables for settings
+        self.base_url_var = tk.StringVar(value=self.config.get("base_url", "http://localhost:8083"))
+        self.auto_start_var = tk.BooleanVar(value=self.config.get("auto_start_server", False))
+        self.stop_on_exit_var = tk.BooleanVar(value=self.config.get("stop_server_on_exit", True))
+        self.health_interval_var = tk.StringVar(value=str(self.config.get("server_health_check_interval", 5)))
+        self.fabric_cmd_var = tk.StringVar(value=self.config.get("fabric_command", "fabric"))
+        self.timeout_var = tk.StringVar(value=str(self.config.get("request_timeout", 300)))
+
+        self._build_ui()
+
+        # Handle window close
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+    def _build_ui(self) -> None:
+        # Tabview
+        self.tabview = ctk.CTkTabview(self, width=480, height=320)
+        self.tabview.pack(padx=10, pady=(10, 5), fill="both", expand=True)
+
+        # Create tabs
+        self.tabview.add("Server")
+        self.tabview.add("Advanced")
+
+        self._build_server_tab()
+        self._build_advanced_tab()
+
+        # Button frame
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=10, pady=10)
+
+        ctk.CTkButton(btn_frame, text="Cancel", command=self._on_cancel, width=100).pack(side="right", padx=5)
+        ctk.CTkButton(btn_frame, text="Save", command=self._on_save, width=100, fg_color="green", hover_color="darkgreen").pack(side="right", padx=5)
+
+    def _build_server_tab(self) -> None:
+        tab = self.tabview.tab("Server")
+
+        # Base URL
+        url_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        url_frame.pack(fill="x", pady=(10, 5), padx=10)
+
+        ctk.CTkLabel(url_frame, text="Base URL:", anchor="w", width=140).pack(side="left")
+        url_entry = ctk.CTkEntry(url_frame, textvariable=self.base_url_var, width=300)
+        url_entry.pack(side="left", padx=(5, 0))
+
+        # Help text for URL
+        url_help = ctk.CTkLabel(tab, text="The Fabric server address (default: http://localhost:8083)", 
+                                text_color="gray", font=("Segoe UI", 11))
+        url_help.pack(anchor="w", padx=15, pady=(0, 15))
+
+        # Auto-start checkbox
+        auto_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        auto_frame.pack(fill="x", pady=5, padx=10)
+
+        ctk.CTkCheckBox(auto_frame, text="Auto-start server on application launch", 
+                        variable=self.auto_start_var, onvalue=True, offvalue=False).pack(anchor="w")
+
+        # Stop on exit checkbox
+        stop_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        stop_frame.pack(fill="x", pady=5, padx=10)
+
+        ctk.CTkCheckBox(stop_frame, text="Stop server when closing application", 
+                        variable=self.stop_on_exit_var, onvalue=True, offvalue=False).pack(anchor="w")
+
+        # Health check interval
+        interval_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        interval_frame.pack(fill="x", pady=(15, 5), padx=10)
+
+        ctk.CTkLabel(interval_frame, text="Health check interval:", anchor="w", width=140).pack(side="left")
+        interval_entry = ctk.CTkEntry(interval_frame, textvariable=self.health_interval_var, width=60)
+        interval_entry.pack(side="left", padx=(5, 5))
+        ctk.CTkLabel(interval_frame, text="seconds").pack(side="left")
+
+    def _build_advanced_tab(self) -> None:
+        tab = self.tabview.tab("Advanced")
+
+        # Fabric command
+        cmd_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        cmd_frame.pack(fill="x", pady=(10, 5), padx=10)
+
+        ctk.CTkLabel(cmd_frame, text="Fabric command:", anchor="w", width=140).pack(side="left")
+        cmd_entry = ctk.CTkEntry(cmd_frame, textvariable=self.fabric_cmd_var, width=300)
+        cmd_entry.pack(side="left", padx=(5, 0))
+
+        cmd_help = ctk.CTkLabel(tab, text="Path to the Fabric executable (default: fabric)", 
+                                text_color="gray", font=("Segoe UI", 11))
+        cmd_help.pack(anchor="w", padx=15, pady=(0, 15))
+
+        # Request timeout
+        timeout_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        timeout_frame.pack(fill="x", pady=5, padx=10)
+
+        ctk.CTkLabel(timeout_frame, text="Request timeout:", anchor="w", width=140).pack(side="left")
+        timeout_entry = ctk.CTkEntry(timeout_frame, textvariable=self.timeout_var, width=60)
+        timeout_entry.pack(side="left", padx=(5, 5))
+        ctk.CTkLabel(timeout_frame, text="seconds").pack(side="left")
+
+        timeout_help = ctk.CTkLabel(tab, text="Maximum time to wait for AI responses (default: 300)", 
+                                    text_color="gray", font=("Segoe UI", 11))
+        timeout_help.pack(anchor="w", padx=15, pady=(0, 15))
+
+    def _validate_and_collect(self) -> Optional[Dict[str, Any]]:
+        """Validate inputs and return config dict, or None if invalid."""
+        errors = []
+
+        # Validate base URL
+        base_url = self.base_url_var.get().strip()
+        if not base_url:
+            errors.append("Base URL cannot be empty")
+        elif not base_url.startswith(("http://", "https://")):
+            errors.append("Base URL must start with http:// or https://")
+
+        # Validate health interval
+        try:
+            health_int = int(self.health_interval_var.get())
+            if health_int < 1 or health_int > 300:
+                errors.append("Health check interval must be between 1 and 300 seconds")
+        except ValueError:
+            errors.append("Health check interval must be a number")
+
+        # Validate timeout
+        try:
+            timeout = int(self.timeout_var.get())
+            if timeout < 10 or timeout > 3600:
+                errors.append("Request timeout must be between 10 and 3600 seconds")
+        except ValueError:
+            errors.append("Request timeout must be a number")
+
+        # Validate fabric command
+        fabric_cmd = self.fabric_cmd_var.get().strip()
+        if not fabric_cmd:
+            errors.append("Fabric command cannot be empty")
+
+        if errors:
+            messagebox.showerror("Validation Error", "\n".join(errors), parent=self)
+            return None
+
+        # Normalize base URL
+        if base_url.endswith("/"):
+            base_url = base_url[:-1]
+
+        return {
+            "base_url": base_url,
+            "auto_start_server": self.auto_start_var.get(),
+            "stop_server_on_exit": self.stop_on_exit_var.get(),
+            "server_health_check_interval": int(self.health_interval_var.get()),
+            "fabric_command": fabric_cmd,
+            "request_timeout": int(self.timeout_var.get()),
+        }
+
+    def _on_save(self) -> None:
+        result = self._validate_and_collect()
+        if result:
+            self.result = result
+            self.destroy()
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
+# -----------------------------
 # GUI
 # -----------------------------
 
@@ -828,6 +1012,8 @@ class FabricGUI(ctk.CTk):
 
         edit_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Edit", menu=edit_menu)
+        edit_menu.add_command(label="Preferences...", command=self.show_preferences, accelerator="Ctrl+,")
+        edit_menu.add_separator()
         edit_menu.add_command(label="Copy Output", command=self.copy_output, accelerator="Ctrl+C")
         edit_menu.add_command(label="Clear Output", command=self.clear_output)
         edit_menu.add_separator()
@@ -850,7 +1036,7 @@ class FabricGUI(ctk.CTk):
         frame = ctk.CTkFrame(self)
         frame.pack(fill="x", padx=10, pady=5)
 
-        title = ctk.CTkLabel(frame, text="Server Configuration", font=FONT_HEADING)
+        title = ctk.CTkLabel(frame, text="Server", font=FONT_HEADING)
         title.grid(row=0, column=0, columnspan=10, sticky="w", padx=10, pady=(6, 0))
 
         content = ctk.CTkFrame(frame, fg_color="transparent")
@@ -865,10 +1051,9 @@ class FabricGUI(ctk.CTk):
         self.led_indicator = self.status_led.create_oval(2, 2, 18, 18, fill="red", outline="darkred")
         self._create_tooltip(self.status_led, "Server: Offline")
 
-        ctk.CTkLabel(content, text="Base URL:").pack(side="left", padx=5)
-        self.entry_url = ctk.CTkEntry(content, textvariable=self.base_url_var, width=280)
-        self.entry_url.pack(side="left", padx=5)
-        ContextMenu(self.entry_url)
+        # Display current server URL as label (edit in Preferences)
+        self.url_display_label = ctk.CTkLabel(content, textvariable=self.base_url_var, text_color="gray")
+        self.url_display_label.pack(side="left", padx=10)
 
         btn_test = ctk.CTkButton(content, text="Test", command=self.on_test_server, width=70)
         btn_test.pack(side="left", padx=5)
@@ -1006,6 +1191,7 @@ class FabricGUI(ctk.CTk):
         self.bind("<Alt-Left>", lambda e: self.history_previous())
         self.bind("<Alt-Right>", lambda e: self.history_next())
         self.bind("<Control-Return>", lambda e: self.on_send())
+        self.bind("<Control-comma>", lambda e: self.show_preferences())
 
     # -----------------------------
     # Tooltip
@@ -1599,6 +1785,41 @@ class FabricGUI(ctk.CTk):
 
     def history_next(self) -> None:
         self._load_history_entry(self.history.next())
+
+    # -----------------------------
+    # Preferences
+    # -----------------------------
+
+    def show_preferences(self) -> None:
+        """Open the Preferences dialog."""
+        dialog = PreferencesDialog(self, self.app_config)
+        self.wait_window(dialog)
+        
+        if dialog.result:
+            # Update config
+            self.app_config.update(dialog.result)
+            ConfigManager.save(self.app_config)
+            
+            # Apply changes to running application
+            self._apply_preferences_changes(dialog.result)
+            
+            logger.info("Preferences saved")
+
+    def _apply_preferences_changes(self, new_settings: Dict[str, Any]) -> None:
+        """Apply preference changes to the running application."""
+        # Update base URL
+        old_url = self.base_url_var.get()
+        new_url = new_settings.get("base_url", old_url)
+        if new_url != old_url:
+            self.base_url_var.set(new_url)
+            self.server_manager.set_base_url(new_url)
+            self._set_status(f"Server URL updated to {new_url}")
+        
+        # Update server manager settings
+        self.server_manager.fabric_command = new_settings.get("fabric_command", "fabric")
+        
+        # Note: health_check_interval changes will take effect on next restart
+        # Note: auto_start and stop_on_exit are checked at startup/exit
 
     # -----------------------------
     # Help / About
