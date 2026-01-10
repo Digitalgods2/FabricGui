@@ -88,18 +88,52 @@ This app works natively on macOS (Intel & Apple Silicon).
    - The app bundle `FabricGoGUI.app` will be creating in `build/bin/`.
    - Drag it to your **Applications** folder or run it directly.
 
-> **Note**: On first run, you might need to allow the app in **System Settings > Privacy & Security** since it's locally built and unsigned.
+   > **Note**: On first run, you might need to allow the app in **System Settings > Privacy & Security** since it's locally built and unsigned.
+
+## 🐧 Linux Support
+
+This app works on most distributions (Ubuntu 20.04+, Fedora, Arch).
+
+### Steps for Linux
+
+1. **Install Prerequisites**:
+
+   ```bash
+   # Debian/Ubuntu
+   sudo apt update
+   sudo apt install libgtk-3-dev libwebkit2gtk-4.0-dev
+
+   # Fedora
+   sudo dnf install gtk3-devel webkit2gtk3-devel
+
+   # Arch Linux
+   sudo pacman -S gtk3 webkit2gtk
+   ```
+
+2. **Clone & Build**:
+
+   ```bash
+   git clone https://github.com/Digitalgods2/FabricGui.git
+   cd FabricGui/FabricGoGUI
+   wails build
+   ```
+
+3. **Run**:
+
+   ```bash
+   ./build/bin/FabricGoGUI
+   ```
 
 ## ⌨️ Keyboard Shortcuts
 
-| Shortcut       | Action                |
-| :---           | :---                  |
-| `Ctrl + Enter` | Send Request          |
-| `Ctrl + S`     | Save Output to File   |
-| `Ctrl + O`     | Import File to Input  |
-| `Alt + ←`      | Previous History Item |
-| `Alt + →`      | Next History Item     |
-| `Esc`          | Close Modals          |
+| Shortcut | Action |
+| :--- | :--- |
+| `Ctrl + Enter` | Send Request |
+| `Ctrl + S` | Save Output to File |
+| `Ctrl + O` | Import File to Input |
+| `Alt + ←` | Previous History Item |
+| `Alt + →` | Next History Item |
+| `Esc` | Close Modals |
 
 ## 🛠️ Architecture
 
