@@ -464,6 +464,7 @@ async function importFile() {
         const content = await OpenFileDialog();
         if (content) {
             elements.inputText.value = content;
+            updateCommandPreview();
             showToast('File imported successfully', 'success');
         }
     } catch (e) {
@@ -698,7 +699,16 @@ function setupEventListeners() {
     const copyCommandBtn = document.getElementById('copyCommandBtn');
     if (copyCommandBtn) {
         copyCommandBtn.addEventListener('click', async () => {
-            const command = elements.commandPreview.textContent;
+            // Re-generate command content to ensure it's up to date
+            const pattern = state.selectedPattern || '[pattern]';
+            const model = state.selectedModel || '[model]';
+            let inputPrefix = '';
+
+            if (elements.inputText && elements.inputText.value) {
+                inputPrefix = 'echo "..." | ';
+            }
+
+            const command = `${inputPrefix}fabric --pattern ${pattern} --model ${model}`;
             await navigator.clipboard.writeText(command);
             showToast('Command copied to clipboard', 'success');
         });
