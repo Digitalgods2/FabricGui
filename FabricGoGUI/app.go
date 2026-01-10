@@ -451,11 +451,17 @@ func (a *App) SendChat(pattern, vendor, model, input string) error {
 
 				if line != "" {
 					var event StreamEvent
-					if err := json.Unmarshal([]byte(line), &event); err == nil {
-						switch event.Type {
 						case "content":
 							runtime.EventsEmit(a.ctx, "chat:chunk", event.Content)
 							fullOutput += event.Content
+						case "complete":
+							if event.Content != "" {
+								runtime.EventsEmit(a.ctx, "chat:chunk", event.Content)
+								fullOutput += event.Content
+							}
+							runtime.EventsEmit(a.ctx, "chat:complete", "")
+							a.AddHistoryEntry(pattern, model, input, fullOutput)
+							return nil
 						case "usage":
 							// ignore usage events
 						}
