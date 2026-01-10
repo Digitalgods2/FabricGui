@@ -432,14 +432,17 @@ func (a *App) SendChat(pattern, vendor, model, input string) error {
 	}
 
 	// Read streaming response (SSE format: "data: {...json...}")
-	// Read streaming response (SSE format: "data: {...json...}")
-	reader := bufio.NewReader(resp.Body)
+	// Use Scanner for robust line reading
+	scanner := bufio.NewScanner(resp.Body)
+	// Increase buffer size just in case (max 1MB lines)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
 	var fullOutput string
 
-	for {
-		line, err := reader.ReadString('\n')
+	for scanner.Scan() {
+		line := scanner.Text()
 
-		// Process the line if we got any data (even if err == io.EOF)
 		if len(line) > 0 {
 			line = strings.TrimSpace(line)
 			if line != "" {
@@ -473,13 +476,10 @@ func (a *App) SendChat(pattern, vendor, model, input string) error {
 				}
 			}
 		}
+	}
 
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return fmt.Errorf("error reading stream: %v", err)
-		}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading stream: %v", err)
 	}
 
 	a.AddHistoryEntry(pattern, model, input, fullOutput)
