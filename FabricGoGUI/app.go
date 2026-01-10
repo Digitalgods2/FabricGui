@@ -433,54 +433,46 @@ func (a *App) SendChat(pattern, vendor, model, input string) error {
 
 	// Read streaming response (SSE format: "data: {...json...}")
 	reader := bufio.NewReader(resp.Body)
+	var fullOutput string
+
 	for {
 		line, err := reader.ReadString('\n')
+
+		// Process the line if we got any data (even if err == io.EOF)
+		if len(line) > 0 {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				// Strip "data: " prefix
+				if strings.HasPrefix(line, "data: ") {
+					line = strings.TrimPrefix(line, "data: ")
+				} else if strings.HasPrefix(line, "data:") {
+					line = strings.TrimPrefix(line, "data:")
+				}
+
+				if line != "" {
+					var event StreamEvent
+					if err := json.Unmarshal([]byte(line), &event); err == nil {
+						switch event.Type {
+						case "content":
+							runtime.EventsEmit(a.ctx, "stream:content", event.Content)
+							fullOutput += event.Content
+						case "usage":
+							// ignore usage events
+						}
+					}
+				}
+			}
+		}
+
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
 			return fmt.Errorf("error reading stream: %v", err)
 		}
-
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		// Strip "data: " prefix if present (SSE format)
-		if strings.HasPrefix(line, "data: ") {
-			line = strings.TrimPrefix(line, "data: ")
-		} else if strings.HasPrefix(line, "data:") {
-			line = strings.TrimPrefix(line, "data:")
-		}
-
-		// Skip empty data
-		if line == "" {
-			continue
-		}
-
-		// Parse the JSON event
-		var event StreamEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			// Not JSON, treat as raw content (shouldn't happen with proper SSE)
-			continue
-		}
-
-		switch event.Type {
-		case "content":
-			runtime.EventsEmit(a.ctx, "chat:chunk", event.Content)
-		case "error":
-			runtime.EventsEmit(a.ctx, "chat:error", event.Content)
-			return fmt.Errorf("chat error: %s", event.Content)
-		case "complete":
-			runtime.EventsEmit(a.ctx, "chat:complete", "")
-			return nil
-		case "usage":
-			// Skip usage events - they're just token counts
-			continue
-		}
 	}
 
+	a.AddHistoryEntry(pattern, model, input, fullOutput)
 	runtime.EventsEmit(a.ctx, "chat:complete", "")
 	return nil
 }
