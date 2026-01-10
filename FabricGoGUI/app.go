@@ -432,6 +432,7 @@ func (a *App) SendChat(pattern, vendor, model, input string) error {
 	}
 
 	// Read streaming response (SSE format: "data: {...json...}")
+	// Read streaming response (SSE format: "data: {...json...}")
 	reader := bufio.NewReader(resp.Body)
 	var fullOutput string
 
@@ -457,6 +458,7 @@ func (a *App) SendChat(pattern, vendor, model, input string) error {
 							runtime.EventsEmit(a.ctx, "chat:chunk", event.Content)
 							fullOutput += event.Content
 						case "complete":
+							// Some servers/models might send the final chunk in the complete event
 							if event.Content != "" {
 								runtime.EventsEmit(a.ctx, "chat:chunk", event.Content)
 								fullOutput += event.Content
