@@ -7,3 +7,7 @@ server_output.txt
 error.log
 probe_server.py
 test_ctk.py
+build/
+dist/
+*.spec
+.claude/
