@@ -912,7 +912,7 @@ class FabricGUI(ctk.CTk):
         self.app_config = ConfigManager.load()
         self.history = OutputHistory()
 
-        # ttk combobox styling
+        # ttk combobox styling - improved readability
         style = ttk.Style()
         try:
             style.theme_use("clam")
@@ -920,23 +920,24 @@ class FabricGUI(ctk.CTk):
             pass
         style.configure(
             "TCombobox",
-            fieldbackground="#333333",
-            background="#333333",
-            foreground="white",
-            arrowcolor="white",
-            bordercolor="#333333",
-            font=("Roboto", 12),
+            fieldbackground="#2b2b2b",
+            background="#2b2b2b",
+            foreground="#ffffff",
+            arrowcolor="#ffffff",
+            bordercolor="#444444",
+            font=("Segoe UI", 14),
+            padding=(6, 4),
         )
         style.map(
             "TCombobox",
-            fieldbackground=[("readonly", "#333333")],
-            selectbackground=[("readonly", "#1f538d")],
-            selectforeground=[("readonly", "white")],
+            fieldbackground=[("readonly", "#2b2b2b")],
+            selectbackground=[("readonly", "#1f6aa5")],
+            selectforeground=[("readonly", "#ffffff")],
         )
-        self.option_add("*TCombobox*Listbox.background", "#333333")
-        self.option_add("*TCombobox*Listbox.foreground", "white")
-        self.option_add("*TCombobox*Listbox.selectBackground", "#1f538d")
-        self.option_add("*TCombobox*Listbox.selectForeground", "white")
+        self.option_add("*TCombobox*Listbox.background", "#2b2b2b")
+        self.option_add("*TCombobox*Listbox.foreground", "#ffffff")
+        self.option_add("*TCombobox*Listbox.selectBackground", "#1f6aa5")
+        self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
         self.option_add("*TCombobox*Listbox.font", ("Segoe UI", 14))
 
         self.server_manager = ServerManager(
@@ -1076,7 +1077,7 @@ class FabricGUI(ctk.CTk):
         search_frame.grid(row=1, column=0, columnspan=6, sticky="ew", padx=5, pady=(6, 0))
 
         ctk.CTkLabel(search_frame, text="Search:", width=60, anchor="e").pack(side="left", padx=5)
-        search_entry = ctk.CTkEntry(search_frame, textvariable=self.pattern_search_var, placeholder_text="Filter patterns...", height=36, font=("Segoe UI", 14))
+        search_entry = ctk.CTkEntry(search_frame, textvariable=self.pattern_search_var, placeholder_text="Type to filter patterns...", height=38, font=("Segoe UI", 14))
         search_entry.pack(side="left", padx=5, fill="x", expand=True)
 
         row2 = ctk.CTkFrame(frame, fg_color="transparent")
@@ -1084,8 +1085,8 @@ class FabricGUI(ctk.CTk):
 
         ctk.CTkLabel(row2, text="Pattern:", width=60, anchor="e").pack(side="left", padx=5)
 
-        self.pattern_combo = ttk.Combobox(row2, textvariable=self.pattern_var, width=45, state="readonly", height=20, font=("Segoe UI", 14))
-        self.pattern_combo.pack(side="left", padx=5, fill="x", expand=True, ipady=6)
+        self.pattern_combo = ttk.Combobox(row2, textvariable=self.pattern_var, width=50, state="readonly", height=25, font=("Segoe UI", 14))
+        self.pattern_combo.pack(side="left", padx=5, fill="x", expand=True, ipady=7)
 
         btn_refresh = ctk.CTkButton(row2, text="Refresh Patterns", command=self.load_patterns)
         btn_refresh.pack(side="left", padx=5)
@@ -1095,8 +1096,8 @@ class FabricGUI(ctk.CTk):
 
         ctk.CTkLabel(model_row, text="Model:", width=60, anchor="e").pack(side="left", padx=5)
 
-        self.model_combo = ttk.Combobox(model_row, textvariable=self.model_var, width=45, state="readonly", height=20, font=("Segoe UI", 14))
-        self.model_combo.pack(side="left", padx=5, fill="x", expand=True, ipady=6)
+        self.model_combo = ttk.Combobox(model_row, textvariable=self.model_var, width=50, state="readonly", height=25, font=("Segoe UI", 14))
+        self.model_combo.pack(side="left", padx=5, fill="x", expand=True, ipady=7)
         self.model_combo.bind("<<ComboboxSelected>>", self._on_model_selected)
 
         self.default_model_label = ctk.CTkLabel(model_row, text="Default: (loading...)", text_color="gray", cursor="hand2")
@@ -1412,14 +1413,41 @@ class FabricGUI(ctk.CTk):
     # -----------------------------
 
     def _filter_patterns(self, *args) -> None:
+        """Filter patterns in real-time as user types in the search box."""
         if not self.all_patterns:
             return
         needle = (self.pattern_search_var.get() or "").strip().lower()
         if not needle:
+            # No search term - show all patterns
             self.pattern_combo.configure(values=self.all_patterns)
+            # Update status to show total count
+            self._update_pattern_search_status(len(self.all_patterns), len(self.all_patterns))
             return
+        
+        # Filter patterns that contain the search term
         filtered = [p for p in self.all_patterns if needle in p.lower()]
-        self.pattern_combo.configure(values=filtered if filtered else ["No matches found"])
+        
+        if not filtered:
+            self.pattern_combo.configure(values=["No matches found"])
+            self.pattern_var.set("")
+            self._update_pattern_search_status(0, len(self.all_patterns))
+        else:
+            self.pattern_combo.configure(values=filtered)
+            # Auto-select the first matching pattern
+            self.pattern_var.set(filtered[0])
+            self._update_pattern_search_status(len(filtered), len(self.all_patterns))
+            
+            # If there's only one match, keep it selected
+            # If there are multiple, user can still browse the dropdown
+
+    def _update_pattern_search_status(self, matching: int, total: int) -> None:
+        """Update status bar with pattern search results."""
+        if matching == total:
+            self.status_var.set(f"Ready • {total} patterns available")
+        elif matching == 0:
+            self.status_var.set(f"No matching patterns (0 of {total})")
+        else:
+            self.status_var.set(f"Showing {matching} of {total} patterns")
 
     def load_patterns(self) -> None:
         try:
