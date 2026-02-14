@@ -1,0 +1,8 @@
+# Fabric Mini GUI Dependencies
+# Requires Python 3.11+
+
+# HTTP client for API communication
+requests>=2.28.0
+
+# Modern dark-mode GUI framework
+customtkinter>=5.2.0
